@@ -4,59 +4,77 @@ import numpy as np
 import altair as alt
 from datetime import date
 
-from src.data_sources import fetch_prices
-from src.paths import data_path
+from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES
+from src.data_sources import fetch_prices, get_fred_cached
+from src.regime import compute_regime_v3
 
 st.set_page_config(
     page_title="Macro Engine",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
+
 
 def inject_css():
     st.markdown(
         """
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
+        html, body {
+          background: #ffffff !important;
+          color: rgba(0,0,0,0.85) !important;
+        }
+
+        [data-testid="stAppViewContainer"] { background: #ffffff !important; }
+        [data-testid="stAppViewContainer"] > .main { background: #ffffff !important; }
+
         .block-container {
-  max-width: 1200px;
-  padding-top: 4.8rem;   /* was ~1.2rem */
-  padding-bottom: 2rem;
-}
+          max-width: 1200px;
+          padding-top: 4.8rem;
+          padding-bottom: 5rem;
+        }
 
-        /* Hide sidebar and its toggle */
-        [data-testid="stSidebar"] { display: none; }
-        [data-testid="collapsedControl"] { display: none; }
-
-        /* Buttons */
         .stButton > button {
           border-radius: 12px !important;
           padding: 0.55rem 0.9rem !important;
           border: 1px solid rgba(0,0,0,0.10) !important;
+          background: #ffffff !important;
+          color: rgba(0,0,0,0.85) !important;
+        }
+
+        input, textarea {
+          background: #ffffff !important;
+          color: rgba(0,0,0,0.85) !important;
+        }
+
+        .stDataFrame, .stTable, [data-testid="stTable"] {
+          background: #ffffff !important;
+          color: rgba(0,0,0,0.85) !important;
         }
 
         .me-topbar {
-  position: sticky;
-  top: 1.5rem;          /* was 0 */
-  z-index: 999;
-  background: rgba(255,255,255,0.92);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(0,0,0,0.06);
-  border-radius: 20px;
-  padding: 18px 20px;
-  margin-bottom: 20px;
-}
+          position: sticky;
+          top: 1.5rem;
+          z-index: 999;
+          background: rgba(255,255,255,0.92);
+          backdrop-filter: blur(10px);
+          border: 1px solid rgba(0,0,0,0.06);
+          border-radius: 20px;
+          padding: 18px 20px;
+          margin-bottom: 20px;
+        }
 
-        /* Bigger, more title-like */
         .me-title {
           font-size: 30px;
           font-weight: 900;
           letter-spacing: -0.6px;
           margin: 0;
           line-height: 1.05;
+          color: rgba(0,0,0,0.90);
         }
 
         .me-subtle {
@@ -65,7 +83,6 @@ def inject_css():
           margin-top: 4px;
         }
 
-        /* Bigger regime chip */
         .me-chip {
           display: inline-flex;
           align-items: center;
@@ -77,6 +94,7 @@ def inject_css():
           font-weight: 900;
           white-space: nowrap;
           background: rgba(0,0,0,0.01);
+          color: rgba(0,0,0,0.85);
         }
 
         .me-dot {
@@ -92,6 +110,7 @@ def inject_css():
           letter-spacing: -1px;
           line-height: 1.0;
           margin-top: 2px;
+          color: rgba(0,0,0,0.90);
         }
 
         .me-pill {
@@ -149,12 +168,12 @@ def inject_css():
           color: rgba(0,0,0,0.72);
         }
 
-        /* Nav tiles */
         .me-nav-title {
           font-weight: 900;
           font-size: 13px;
           margin: 0;
           line-height: 1.15;
+          color: rgba(0,0,0,0.85);
         }
         .me-nav-desc {
           color: rgba(0,0,0,0.55);
@@ -162,13 +181,63 @@ def inject_css():
           margin-top: 4px;
           line-height: 1.25;
         }
+
+        @media (max-width: 700px) {
+
+          .block-container {
+            padding-top: 4.0rem !important;
+            padding-left: 1.0rem !important;
+            padding-right: 1.0rem !important;
+          }
+
+          .me-topbar {
+            top: 0.75rem !important;
+            padding: 12px 12px !important;
+            border-radius: 16px !important;
+            margin-bottom: 14px !important;
+          }
+
+          .me-title {
+            font-size: 22px !important;
+            letter-spacing: -0.3px !important;
+          }
+
+          .me-chip {
+            font-size: 14px !important;
+            padding: 8px 10px !important;
+            gap: 8px !important;
+          }
+
+          .me-kpi { font-size: 32px !important; }
+
+          div[data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 10px !important;
+          }
+          div[data-testid="column"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+          }
+
+          div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+            min-width: 280px;
+          }
+
+          .stButton > button {
+            width: 100% !important;
+            padding: 0.65rem 0.9rem !important;
+          }
+
+          .stTabs [data-baseweb="tab"] { font-size: 14px !important; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
-    
+
 
 inject_css()
+
 
 def regime_color(regime: str) -> str:
     r = (regime or "").lower()
@@ -178,42 +247,282 @@ def regime_color(regime: str) -> str:
         return "#b42318"
     return "#6b7280"
 
+
 def safe_switch_page(path: str):
     try:
         st.switch_page(path)
     except Exception:
         st.error(f"Missing page: {path}. Make sure the file exists in your pages folder.")
 
+
+def sidebar_nav(active: str = "Home"):
+    st.sidebar.title("Macro Engine")
+    st.sidebar.caption("Navigation")
+
+    pages = {
+        "Home": "app.py",
+        "Macro charts": "pages/2_Macro_Charts.py",
+        "Regime deep dive": "pages/1_Regime_Deep_Dive.py",
+        "Drivers": "pages/5_Drivers.py",
+        "Ticker drilldown": "pages/3_Ticker_Detail.py",
+    }
+
+    keys = list(pages.keys())
+    idx = keys.index(active) if active in pages else 0
+    choice = st.sidebar.selectbox("Go to", keys, index=idx, label_visibility="collapsed")
+    if choice != active:
+        safe_switch_page(pages[choice])
+
+
+ROTATION_TICKERS = ["XLE", "XLF", "XLK", "XLI", "XLP", "XLV", "GLD", "UUP", "IWM", "QQQ", "SPY"]
+MARKET_SNAPSHOT = ["SPY", "QQQ", "IWM", "HYG", "TLT", "UUP", "GLD", "XLE"]
+
+
+def _nearest_before(series: pd.Series, dt: pd.Timestamp):
+    s = series.dropna()
+    if s.empty:
+        return None
+    idx = s.index[s.index <= dt]
+    if len(idx) == 0:
+        return None
+    return pd.Timestamp(idx.max())
+
+
+def delta_over_days(series: pd.Series, days: int):
+    s = series.dropna()
+    if s.empty:
+        return None, None, None
+
+    end = pd.Timestamp(s.index.max())
+    prev_dt = end - pd.Timedelta(days=days)
+
+    end_i = _nearest_before(s, end)
+    prev_i = _nearest_before(s, prev_dt)
+    if end_i is None or prev_i is None:
+        return None, None, None
+
+    latest = float(s.loc[end_i])
+    prev = float(s.loc[prev_i])
+    return latest, prev, float(latest - prev)
+
+
+def pct_return_over_days(series: pd.Series, days: int):
+    s = series.dropna()
+    if len(s) < days + 2:
+        return None
+    end = s.index.max()
+    prev_dt = end - pd.Timedelta(days=days)
+    end_i = _nearest_before(s, end)
+    prev_i = _nearest_before(s, prev_dt)
+    if end_i is None or prev_i is None:
+        return None
+    a = float(s.loc[end_i])
+    b = float(s.loc[prev_i])
+    if b == 0:
+        return None
+    return (a / b) - 1.0
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def load_current_regime():
+    if not FRED_API_KEY:
+        raise RuntimeError("FRED_API_KEY is not set")
+
+    macro = get_fred_cached(FRED_SERIES, FRED_API_KEY, CACHE_DIR, cache_name="fred_macro").sort_index()
+    px = fetch_prices(list(dict.fromkeys(ROTATION_TICKERS + MARKET_SNAPSHOT)), period="5y")
+    if px is None or px.empty:
+        px = pd.DataFrame()
+    else:
+        px = px.sort_index()
+
+    regime = compute_regime_v3(macro=macro, proxies=px, lookback_trend=63, momentum_lookback_days=21)
+    return regime, macro, px
+
+
+def _component_contribution(c: dict) -> float:
+    if not isinstance(c, dict):
+        return 0.0
+    if isinstance(c.get("contribution"), (int, float, np.floating)):
+        return float(c["contribution"])
+    z = c.get("zscore")
+    w = c.get("weight")
+    if isinstance(z, (int, float, np.floating)) and isinstance(w, (int, float, np.floating)):
+        return float(z) * float(w)
+    return 0.0
+
+
+def _trend_phrase(name: str, trend_up):
+    nm = (name or "").lower()
+    if trend_up is None:
+        return "steady"
+    if "credit" in nm or "spread" in nm:
+        return "widening" if int(trend_up) == 1 else "tightening"
+    if "dollar" in nm or "usd" in nm:
+        return "strengthening" if int(trend_up) == 1 else "weakening"
+    if "real" in nm or "yield" in nm or "rates" in nm:
+        return "rising" if int(trend_up) == 1 else "falling"
+    return "rising" if int(trend_up) == 1 else "falling"
+
+
+def build_dynamic_drivers(regime_obj, macro: pd.DataFrame, px: pd.DataFrame):
+    drivers = []
+
+    comps = getattr(regime_obj, "components", None)
+    if isinstance(comps, dict) and comps:
+        rows = []
+        for k, c in comps.items():
+            if not isinstance(c, dict):
+                continue
+            nm = c.get("name", k)
+            contrib = _component_contribution(c)
+            rows.append((nm, contrib, c.get("trend_up"), c.get("zscore")))
+        rows = sorted(rows, key=lambda x: abs(x[1]), reverse=True)
+
+        for nm, contrib, trend_up, z in rows[:3]:
+            direction = "supportive" if contrib >= 0 else "drag"
+            trend = _trend_phrase(nm, trend_up)
+            ztxt = "" if z is None or pd.isna(z) else f"z {float(z):.2f}"
+            subtitle = f"{trend} • {direction}" + (f" • {ztxt}" if ztxt else "")
+            drivers.append((str(nm), subtitle))
+
+    if len(drivers) < 3 and isinstance(macro, pd.DataFrame) and not macro.empty:
+        if "hy_oas" in macro.columns:
+            latest, prev, dlt = delta_over_days(macro["hy_oas"], 7)
+            if dlt is not None:
+                drivers.append(("Credit conditions", "tightening" if dlt < 0 else "widening"))
+
+        if isinstance(px, pd.DataFrame) and not px.empty and "IWM" in px.columns and "RSP" in px.columns:
+            r_iwm = pct_return_over_days(px["IWM"], 21)
+            r_rsp = pct_return_over_days(px["RSP"], 21) if "RSP" in px.columns else None
+            if r_iwm is not None:
+                msg = "small caps leading" if r_iwm > 0 else "small caps lagging"
+                if r_rsp is not None:
+                    msg = msg + f" • equal weight {('up' if r_rsp > 0 else 'down')}"
+                drivers.append(("Breadth proxy", msg))
+
+    drivers = drivers[:3]
+    if not drivers:
+        drivers = [("Drivers unavailable", "Regime engine returned no components")]
+
+    return drivers
+
+
+def build_allocation_tilt(regime_obj):
+    alloc = getattr(regime_obj, "allocation", None)
+    stance = {}
+    if isinstance(alloc, dict):
+        stance = alloc.get("stance", {}) if isinstance(alloc.get("stance", {}), dict) else {}
+
+    keys = ["Equities", "Credit", "Duration", "USD", "Commodities"]
+    out = []
+    for k in keys:
+        v = stance.get(k)
+        if v is None:
+            continue
+        out.append((k, str(v)))
+    return out
+
+
+def build_key_risk(regime_obj):
+    comps = getattr(regime_obj, "components", None)
+    if isinstance(comps, dict) and comps:
+        rows = []
+        for k, c in comps.items():
+            if not isinstance(c, dict):
+                continue
+            nm = c.get("name", k)
+            contrib = _component_contribution(c)
+            z = c.get("zscore")
+            rows.append((nm, contrib, z))
+        rows = sorted(rows, key=lambda x: x[1])
+        nm, contrib, z = rows[0]
+        ztxt = "" if z is None or pd.isna(z) else f"z {float(z):.2f}"
+        if contrib < 0:
+            return f"Primary risk is {nm} staying adverse" + (f" ({ztxt})" if ztxt else "")
+        return f"Primary risk is {nm} reversing against the signal" + (f" ({ztxt})" if ztxt else "")
+    return "Primary risk is regime momentum reversing on a growth or credit shock."
+
+
+def build_weekly_macro_changes(macro: pd.DataFrame):
+    items = []
+
+    if not isinstance(macro, pd.DataFrame) or macro.empty:
+        return items
+
+    if "hy_oas" in macro.columns:
+        latest, prev, dlt = delta_over_days(macro["hy_oas"], 7)
+        if dlt is not None:
+            items.append(("Credit spreads (HY OAS)", prev, latest, dlt, "tighter" if dlt < 0 else "wider"))
+
+    if "y10" in macro.columns and "y2" in macro.columns:
+        curve = (macro["y10"] - macro["y2"]).dropna()
+        latest, prev, dlt = delta_over_days(curve, 7)
+        if dlt is not None:
+            items.append(("Curve (10y minus 2y)", prev, latest, dlt, "steeper" if dlt > 0 else "flatter"))
+
+    if "real10" in macro.columns:
+        latest, prev, dlt = delta_over_days(macro["real10"], 7)
+        if dlt is not None:
+            items.append(("Real 10y", prev, latest, dlt, "higher" if dlt > 0 else "lower"))
+
+    if "dollar_broad" in macro.columns:
+        latest, prev, dlt = delta_over_days(macro["dollar_broad"], 7)
+        if dlt is not None:
+            items.append(("Dollar broad", prev, latest, dlt, "stronger" if dlt > 0 else "weaker"))
+
+    return items
+
+
+def build_weekly_snapshot_tables(macro: pd.DataFrame, px: pd.DataFrame):
+    macro_rows = []
+    mkt_rows = []
+
+    for name, prev, cur, dlt, _lab in build_weekly_macro_changes(macro):
+        macro_rows.append(
+            {
+                "Metric": name,
+                "Level": cur,
+                "Weekly change": dlt,
+            }
+        )
+
+    if isinstance(px, pd.DataFrame) and not px.empty:
+        for t in MARKET_SNAPSHOT:
+            if t not in px.columns:
+                continue
+            r = pct_return_over_days(px[t], 7)
+            if r is None:
+                continue
+            mkt_rows.append({"Asset": t, "Weekly change": 100.0 * float(r)})
+
+    macro_df = pd.DataFrame(macro_rows)
+    mkt_df = pd.DataFrame(mkt_rows).sort_values("Weekly change", ascending=False) if mkt_rows else pd.DataFrame()
+
+    return macro_df, mkt_df
+
+
 def load_home_state():
-    last_updated = date.today()
+    regime_obj, macro, px = load_current_regime()
 
-    regime = "Risk On"
-    score = 65
-    confidence = "High"
-    momentum = "Stable"
+    if isinstance(macro, pd.DataFrame) and not macro.empty:
+        try:
+            last_updated = macro.index.max().date()
+        except Exception:
+            last_updated = date.today()
+    else:
+        last_updated = date.today()
 
-    allocation_tilt = [
-        ("Equities", "Overweight"),
-        ("Credit", "Overweight"),
-        ("Duration", "Underweight"),
-        ("USD", "Underweight"),
-        ("Commodities", "Overweight"),
-    ]
+    regime = getattr(regime_obj, "label", "Unknown")
+    score = int(getattr(regime_obj, "score", 0))
+    confidence = getattr(regime_obj, "confidence", "Unknown")
+    momentum = getattr(regime_obj, "momentum_label", "Unknown")
 
-    weekly_changes = [
-        ("Credit spreads", 2.95, 2.86, -0.09, "tighter"),
-        ("Curve (10y minus 2y)", 0.64, 0.60, -0.04, "flatter"),
-        ("Real 10y", 1.77, 1.80, 0.03, "higher"),
-        ("Dollar broad", 117.53, 117.99, 0.47, "stronger"),
-    ]
+    allocation_tilt = build_allocation_tilt(regime_obj)
+    weekly_changes = build_weekly_macro_changes(macro)
+    drivers = build_dynamic_drivers(regime_obj, macro, px)
+    key_risk = build_key_risk(regime_obj)
 
-    drivers = [
-        ("Equities favored by regime score", "See credit and breadth"),
-        ("Breadth improving", "See small caps and equal weight"),
-        ("Credit spreads tight", "See HY OAS"),
-    ]
-
-    key_risk = "Watch inflation expectations, real yields, and credit for a reversal signal."
+    macro_df, mkt_df = build_weekly_snapshot_tables(macro, px)
 
     return {
         "last_updated": last_updated,
@@ -225,7 +534,13 @@ def load_home_state():
         "weekly_changes": weekly_changes,
         "drivers": drivers,
         "key_risk": key_risk,
+        "macro_snapshot": macro_df,
+        "market_snapshot": mkt_df,
+        "macro": macro,
+        "px": px,
+        "regime_obj": regime_obj,
     }
+
 
 @st.cache_data(show_spinner=False)
 def compute_rs_heatmap(period: str = "1y") -> pd.DataFrame:
@@ -270,13 +585,19 @@ def compute_rs_heatmap(period: str = "1y") -> pd.DataFrame:
 
     return out
 
+
 def leaders_laggards(rs_df: pd.DataFrame, horizon: str):
     s = rs_df[horizon].dropna().sort_values(ascending=False)
     return s.head(5), s.tail(5)
 
+
+if not FRED_API_KEY:
+    st.error("FRED_API_KEY is not set. Add it as an environment variable locally and in your host.")
+    st.stop()
+
+sidebar_nav(active="Home")
 home = load_home_state()
 
-# Top bar
 chip = home["regime"]
 dot = regime_color(chip)
 
@@ -306,13 +627,12 @@ with st.container():
             unsafe_allow_html=True,
         )
 
-# Top navigation row with descriptors
 nav_defs = [
     ("Home", "Overview and summary", None),
     ("Macro charts", "Rates, credit, liquidity, risk", "pages/2_Macro_Charts.py"),
-    ("Weekly details", "Notes and deltas", "pages/1_Regime_Deep_Dive.py"),
+    ("Regime deep dive", "Notes, deltas, components", "pages/1_Regime_Deep_Dive.py"),
     ("Drivers", "Narrative and chart links", "pages/5_Drivers.py"),
-    ("Score", "Breakdown and history", "pages/1_Regime_Deep_Dive.py"),
+    ("Ticker drilldown", "RS, MAs, setups", "pages/3_Ticker_Detail.py"),
 ]
 
 nav_cols = st.columns(5, gap="small")
@@ -330,7 +650,6 @@ for i, (title, desc, path) in enumerate(nav_defs):
 
 st.markdown("")
 
-# Hero row (Key drivers moved above Regime and tilt)
 h1, h2, h3, h4 = st.columns([1.0, 1.15, 1.2, 1.0], gap="large")
 
 with h1:
@@ -341,7 +660,7 @@ with h1:
             f"""
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
               <span class="me-pill">Confidence: {home['confidence']}</span>
-              <span class="me-pill">Momentum: {home['momentum']}</span>
+              <span class="me-pill">Momentum: {str(home['momentum']).lower()}</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -372,25 +691,25 @@ with h2:
 with h3:
     with st.container(border=True):
         st.markdown("<div class='me-rowtitle'>What changed this week</div>", unsafe_allow_html=True)
-        for name, prev, cur, delta, label in home["weekly_changes"]:
-            if delta > 0:
-                arrow = "↑"
-            elif delta < 0:
-                arrow = "↓"
-            else:
-                arrow = "→"
-            st.markdown(
-                f"""
-                <div class="me-li">
-                  <div>
-                    <div class="me-li-name">{name}</div>
-                    <div class="me-li-sub">{prev:.2f} to {cur:.2f} ({label})</div>
-                  </div>
-                  <div class="me-li-right">{arrow} {abs(delta):.2f}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+
+        if home["weekly_changes"]:
+            for name, prev, cur, delta, label in home["weekly_changes"]:
+                arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+                st.markdown(
+                    f"""
+                    <div class="me-li">
+                      <div>
+                        <div class="me-li-name">{name}</div>
+                        <div class="me-li-sub">{prev:.2f} to {cur:.2f} ({label})</div>
+                      </div>
+                      <div class="me-li-right">{arrow} {abs(delta):.2f}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("Weekly changes unavailable for the current macro dataset.")
+
         st.markdown("")
         if st.button("Open weekly details", use_container_width=True, key="btn_weekly"):
             safe_switch_page("pages/1_Regime_Deep_Dive.py")
@@ -408,7 +727,6 @@ with h4:
 
 st.markdown("")
 
-# Flows heatmap card
 with st.container(border=True):
     st.markdown("<div class='me-rowtitle'>Leadership vs SPY</div>", unsafe_allow_html=True)
 
@@ -424,7 +742,7 @@ with st.container(border=True):
         ltxt = ", ".join(leaders.index.tolist()[:2]) if len(leaders) else "n a"
         gtxt = ", ".join(laggards.index.tolist()[:2]) if len(laggards) else "n a"
         st.markdown(
-            f"<div class='me-subtle'>Takeaway</div><div style='font-weight:900;'>Leadership: {ltxt} | Laggards: {gtxt}</div>",
+            f"<div class='me-subtle'>Takeaway</div><div style='font-weight:900; color:rgba(0,0,0,0.85);'>Leadership: {ltxt} | Laggards: {gtxt}</div>",
             unsafe_allow_html=True,
         )
     with top_controls[3]:
@@ -466,87 +784,98 @@ with st.container(border=True):
 
 st.markdown("")
 
-# Weekly snapshot card
 with st.container(border=True):
     st.markdown("<div class='me-rowtitle'>Weekly snapshot</div>", unsafe_allow_html=True)
     tab1, tab2 = st.tabs(["Macro", "Markets"])
 
-    macro_df = pd.DataFrame(
-        {
-            "Metric": ["Credit spreads", "Curve (10y minus 2y)", "Real 10y", "Dollar broad"],
-            "Level": [2.86, 0.60, 1.80, 117.99],
-            "Weekly change": [-0.09, -0.04, 0.03, 0.47],
-        }
-    )
-    mkt_df = pd.DataFrame(
-        {
-            "Asset": ["SPY", "QQQ", "IWM", "HYG", "TLT", "DXY", "WTI", "Gold"],
-            "Weekly change": [0.8, 1.2, 0.4, 0.3, -0.6, -0.5, 1.5, 0.7],
-        }
-    )
+    macro_df = home["macro_snapshot"]
+    mkt_df = home["market_snapshot"]
 
     with tab1:
-        st.dataframe(macro_df, use_container_width=True, hide_index=True)
+        if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
+            show = macro_df.copy()
+            for c in ["Level", "Weekly change"]:
+                if c in show.columns:
+                    show[c] = pd.to_numeric(show[c], errors="coerce")
+            st.dataframe(show, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Macro snapshot unavailable for the current dataset.")
+
     with tab2:
-        st.dataframe(mkt_df, use_container_width=True, hide_index=True)
+        if isinstance(mkt_df, pd.DataFrame) and not mkt_df.empty:
+            show = mkt_df.copy()
+            if "Weekly change" in show.columns:
+                show["Weekly change"] = pd.to_numeric(show["Weekly change"], errors="coerce")
+            st.dataframe(show, use_container_width=True, hide_index=True)
+            st.caption("Market weekly change is percent return over the last week window.")
+        else:
+            st.caption("Market snapshot unavailable for the current price dataset.")
 
     st.markdown("")
-    if st.button("Open weekly details", use_container_width=True, key="btn_weekly_bottom"):
+    if st.button("Open regime deep dive", use_container_width=True, key="btn_weekly_bottom"):
         safe_switch_page("pages/1_Regime_Deep_Dive.py")
 
 st.markdown("")
 
-# Bottom section: Regime and tilt + Why this regime
 b1, b2 = st.columns([1.0, 1.2], gap="large")
 
 with b1:
     with st.container(border=True):
         st.markdown("<div class='me-rowtitle'>Regime and tilt</div>", unsafe_allow_html=True)
         st.markdown(
-            f"<div style='font-size:18px; font-weight:900; margin-bottom:10px;'>{home['regime']}</div>",
+            f"<div style='font-size:18px; font-weight:900; margin-bottom:10px; color:rgba(0,0,0,0.85);'>{home['regime']}</div>",
             unsafe_allow_html=True,
         )
-        for k, v in home["allocation_tilt"]:
-            st.markdown(
-                f"""
-                <div class="me-li">
-                  <div>
-                    <div class="me-li-name">{k}</div>
-                    <div class="me-li-sub">Suggested stance</div>
-                  </div>
-                  <div class="me-li-right">{v}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+
+        if home["allocation_tilt"]:
+            for k, v in home["allocation_tilt"]:
+                st.markdown(
+                    f"""
+                    <div class="me-li">
+                      <div>
+                        <div class="me-li-name">{k}</div>
+                        <div class="me-li-sub">Suggested stance</div>
+                      </div>
+                      <div class="me-li-right">{v}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("Allocation tilt unavailable from the current regime output.")
 
 with b2:
     with st.container(border=True):
         st.markdown("<div class='me-rowtitle'>Why this regime</div>", unsafe_allow_html=True)
 
-        comp = pd.DataFrame(
-            {
-                "Component": ["Credit stress", "Risk appetite", "Curve", "Real yields", "Dollar impulse"],
-                "Contribution": [12, 8, 6, 4, -3],
-            }
-        ).sort_values("Contribution", ascending=False)
+        comps = getattr(home["regime_obj"], "components", None)
+        if isinstance(comps, dict) and comps:
+            rows = []
+            for k, c in comps.items():
+                if not isinstance(c, dict):
+                    continue
+                nm = c.get("name", k)
+                rows.append({"Component": str(nm), "Contribution": float(_component_contribution(c))})
+            comp = pd.DataFrame(rows).sort_values("Contribution", ascending=False)
 
-        ch = (
-            alt.Chart(comp)
-            .mark_bar(
-                cornerRadiusTopLeft=6,
-                cornerRadiusTopRight=6,
-                cornerRadiusBottomLeft=6,
-                cornerRadiusBottomRight=6,
+            ch = (
+                alt.Chart(comp)
+                .mark_bar(
+                    cornerRadiusTopLeft=6,
+                    cornerRadiusTopRight=6,
+                    cornerRadiusBottomLeft=6,
+                    cornerRadiusBottomRight=6,
+                )
+                .encode(
+                    y=alt.Y("Component:N", sort="-x", title=None),
+                    x=alt.X("Contribution:Q", title=None),
+                    tooltip=["Component", alt.Tooltip("Contribution:Q", format=".2f")],
+                )
+                .properties(height=240)
             )
-            .encode(
-                y=alt.Y("Component:N", sort="-x", title=None),
-                x=alt.X("Contribution:Q", title=None),
-                tooltip=["Component", "Contribution"],
-            )
-            .properties(height=240)
-        )
-        st.altair_chart(ch, use_container_width=True)
+            st.altair_chart(ch, use_container_width=True)
+        else:
+            st.caption("Component contributions unavailable from the current regime output.")
 
         st.markdown("")
         if st.button("Open component detail", use_container_width=True, key="btn_components"):
@@ -554,12 +883,11 @@ with b2:
 
 st.markdown("")
 
-# Explore tiles
 tiles = st.columns(5, gap="small")
 tile_defs = [
     ("Macro charts", "Rates, credit, liquidity, risk", "pages/2_Macro_Charts.py"),
     ("Ticker drilldown", "RS, MAs, setup features", "pages/3_Ticker_Detail.py"),
-    ("Weekly details", "Notes and deltas", "pages/1_Regime_Deep_Dive.py"),
+    ("Regime deep dive", "Notes, deltas, components", "pages/1_Regime_Deep_Dive.py"),
     ("Drivers", "Narrative and chart links", "pages/5_Drivers.py"),
     ("Score", "Breakdown and history", "pages/1_Regime_Deep_Dive.py"),
 ]
@@ -567,8 +895,13 @@ tile_defs = [
 for i, (t, d, path) in enumerate(tile_defs):
     with tiles[i]:
         with st.container(border=True):
-            st.markdown(f"<div style='font-weight:900; font-size:13px;'>{t}</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='font-weight:900; font-size:13px; color:rgba(0,0,0,0.85);'>{t}</div>",
+                unsafe_allow_html=True,
+            )
             st.markdown(f"<div class='me-subtle'>{d}</div>", unsafe_allow_html=True)
             st.markdown("")
             if st.button("Open", use_container_width=True, key=f"tile_open_{i}"):
                 safe_switch_page(path)
+
+st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)

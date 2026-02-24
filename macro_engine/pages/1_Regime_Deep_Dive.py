@@ -7,7 +7,11 @@ from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES
 from src.data_sources import fetch_prices, get_fred_cached
 from src.regime import compute_regime_v3, compute_regime_timeseries
 
-st.set_page_config(page_title="Regime deep dive", layout="wide")
+st.set_page_config(
+    page_title="Regime deep dive",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 def inject_css():
     st.markdown(
@@ -17,16 +21,11 @@ def inject_css():
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
         .block-container {
-  max-width: 1200px;
-  padding-top: 4.8rem;   /* was ~1.2rem */
-  padding-bottom: 2rem;
-}
+          max-width: 1200px;
+          padding-top: 4.8rem;
+          padding-bottom: 5rem;
+        }
 
-        /* Hide sidebar and its toggle */
-        [data-testid="stSidebar"] { display: none; }
-        [data-testid="collapsedControl"] { display: none; }
-
-        /* Buttons */
         .stButton > button {
           border-radius: 12px !important;
           padding: 0.55rem 0.9rem !important;
@@ -34,16 +33,16 @@ def inject_css():
         }
 
         .me-topbar {
-  position: sticky;
-  top: 1.5rem;          /* was 0 */
-  z-index: 999;
-  background: rgba(255,255,255,0.92);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(0,0,0,0.06);
-  border-radius: 16px;
-  padding: 14px 16px;
-  margin-bottom: 16px;
-}
+          position: sticky;
+          top: 1.5rem;
+          z-index: 999;
+          background: rgba(255,255,255,0.92);
+          backdrop-filter: blur(10px);
+          border: 1px solid rgba(0,0,0,0.06);
+          border-radius: 16px;
+          padding: 14px 16px;
+          margin-bottom: 16px;
+        }
 
         .me-title {
           font-size: 24px;
@@ -135,20 +134,44 @@ def inject_css():
           white-space: nowrap;
           color: rgba(0,0,0,0.72);
         }
-
-        .me-kpi {
-          font-size: 38px;
-          font-weight: 900;
-          letter-spacing: -1px;
-          line-height: 1.0;
-          margin-top: 2px;
-        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 inject_css()
+
+def safe_switch_page(path: str):
+    try:
+        st.switch_page(path)
+    except Exception:
+        st.error(f"Missing page: {path}. Check your pages folder.")
+
+def sidebar_nav(active: str = "Regime deep dive"):
+    st.sidebar.title("Macro Engine")
+    st.sidebar.caption("Navigation")
+
+    pages = {
+        "Home": "app.py",
+        "Macro charts": "pages/2_Macro_Charts.py",
+        "Regime deep dive": "pages/1_Regime_Deep_Dive.py",
+        "Drivers": "pages/5_Drivers.py",
+        "Ticker drilldown": "pages/3_Ticker_Detail.py",
+    }
+
+    keys = list(pages.keys())
+    idx = keys.index(active) if active in pages else 0
+
+    choice = st.sidebar.selectbox(
+        "Go to",
+        keys,
+        index=idx,
+        label_visibility="collapsed",
+    )
+    if choice != active:
+        safe_switch_page(pages[choice])
+
+sidebar_nav(active="Regime deep dive")
 
 ROTATION_TICKERS = ["XLE", "XLF", "XLK", "XLI", "XLP", "XLV", "GLD", "UUP", "IWM", "QQQ", "SPY"]
 
@@ -160,17 +183,24 @@ def regime_color(regime: str) -> str:
         return "#b42318"
     return "#6b7280"
 
-@st.cache_data(ttl=12 * 60 * 60)
+@st.cache_data(ttl=12 * 60 * 60, show_spinner=False)
 def load_macro() -> pd.DataFrame:
     df = get_fred_cached(FRED_SERIES, FRED_API_KEY, CACHE_DIR, cache_name="fred_macro")
     return df.sort_index()
 
-@st.cache_data(ttl=6 * 60 * 60)
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def load_prices(tickers: list[str], period: str = "5y") -> pd.DataFrame:
     df = fetch_prices(tickers, period=period)
     if df is None or df.empty:
         return pd.DataFrame()
     return df.sort_index()
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def load_current_regime():
+    macro = load_macro()
+    px = load_prices(ROTATION_TICKERS, period="5y")
+    regime = compute_regime_v3(macro=macro, proxies=px, lookback_trend=63, momentum_lookback_days=21)
+    return regime, macro, px
 
 def fmt_num(x: float, nd: int = 2) -> str:
     if x is None or pd.isna(x):
@@ -243,16 +273,13 @@ def plot_regime_history(score_df: pd.DataFrame, spy: pd.Series, window: str) -> 
     )
     return fig
 
-# ---- Run ----
+# Run
 if not FRED_API_KEY:
     st.error("FRED_API_KEY is not set. Add it as an environment variable locally and in Render.")
     st.stop()
 
-macro = load_macro()
-px = load_prices(ROTATION_TICKERS, period="5y")
-regime = compute_regime_v3(macro=macro, proxies=px, lookback_trend=63, momentum_lookback_days=21)
+regime, macro, px = load_current_regime()
 
-# Top bar (pretty)
 dot = regime_color(getattr(regime, "label", "") or "")
 tleft, tright = st.columns([3, 1], vertical_alignment="center")
 with tleft:
@@ -266,7 +293,7 @@ with tleft:
             </div>
             <div class="me-chip">
               <span class="me-dot" style="background:{dot}"></span>
-              <span>{regime.label}</span>
+              <span>{getattr(regime, "label", "Unknown")}</span>
             </div>
           </div>
         </div>
@@ -275,71 +302,74 @@ with tleft:
     )
 with tright:
     if st.button("Back to home", use_container_width=True):
-        st.switch_page("app.py")
+        safe_switch_page("app.py")
 
-# Summary pills
 st.markdown(
     f"""
-    <span class="me-pill">Score: {regime.score}</span>
-    <span class="me-pill">Confidence: {regime.confidence}</span>
-    <span class="me-pill">Momentum: {regime.momentum_label.lower()}</span>
+    <span class="me-pill">Score: {getattr(regime, "score", "")}</span>
+    <span class="me-pill">Confidence: {getattr(regime, "confidence", "")}</span>
+    <span class="me-pill">Momentum: {str(getattr(regime, "momentum_label", "")).lower()}</span>
     """,
     unsafe_allow_html=True,
 )
 
 st.markdown("")
 
-# Build weekly bullets and component rows first so we can place them at the top
 days_look = 7
 bullets = []
 
-if "hy_oas" in macro.columns:
-    latest, prev, dlt = delta_over_days(macro["hy_oas"], days_look)
-    if dlt is not None:
-        bullets.append(("Credit spreads (HY OAS)", latest, prev, dlt))
-if "y10" in macro.columns and "y2" in macro.columns:
-    curve = (macro["y10"] - macro["y2"]).dropna()
-    latest, prev, dlt = delta_over_days(curve, days_look)
-    if dlt is not None:
-        bullets.append(("Curve (10y minus 2y)", latest, prev, dlt))
-if "real10" in macro.columns:
-    latest, prev, dlt = delta_over_days(macro["real10"], days_look)
-    if dlt is not None:
-        bullets.append(("Real 10y", latest, prev, dlt))
-if "dollar_broad" in macro.columns:
-    latest, prev, dlt = delta_over_days(macro["dollar_broad"], days_look)
-    if dlt is not None:
-        bullets.append(("Dollar broad", latest, prev, dlt))
+if isinstance(macro, pd.DataFrame) and not macro.empty:
+    if "hy_oas" in macro.columns:
+        latest, prev, dlt = delta_over_days(macro["hy_oas"], days_look)
+        if dlt is not None:
+            bullets.append(("Credit spreads (HY OAS)", latest, prev, dlt))
+    if "y10" in macro.columns and "y2" in macro.columns:
+        curve = (macro["y10"] - macro["y2"]).dropna()
+        latest, prev, dlt = delta_over_days(curve, days_look)
+        if dlt is not None:
+            bullets.append(("Curve (10y minus 2y)", latest, prev, dlt))
+    if "real10" in macro.columns:
+        latest, prev, dlt = delta_over_days(macro["real10"], days_look)
+        if dlt is not None:
+            bullets.append(("Real 10y", latest, prev, dlt))
+    if "dollar_broad" in macro.columns:
+        latest, prev, dlt = delta_over_days(macro["dollar_broad"], days_look)
+        if dlt is not None:
+            bullets.append(("Dollar broad", latest, prev, dlt))
 
 if not bullets:
     bullets = [("No weekly deltas available yet", None, None, None)]
 
 rows = []
-for key, c in regime.components.items():
-    level = c.get("level")
-    z = c.get("zscore")
-    trend_up = c.get("trend_up")
+components = getattr(regime, "components", {})
+if isinstance(components, dict):
+    for key, c in components.items():
+        if not isinstance(c, dict):
+            continue
+        level = c.get("level")
+        z = c.get("zscore")
+        trend_up = c.get("trend_up")
 
-    if trend_up is None:
-        trend_txt = ""
-    else:
-        if key == "credit":
-            trend_txt = "tightening" if trend_up == 0 else "widening"
+        if trend_up is None:
+            trend_txt = ""
         else:
-            trend_txt = "up" if trend_up == 1 else "down"
+            if key == "credit":
+                trend_txt = "tightening" if trend_up == 0 else "widening"
+            else:
+                trend_txt = "up" if trend_up == 1 else "down"
 
-    rows.append(
-        {
-            "Component": c.get("name", key),
-            "Level": "" if level is None else f"{float(level):.2f}",
-            "Z": "" if z is None else f"{float(z):.2f}",
-            "Trend": trend_txt,
-            "Weight": f"{float(c.get('weight', 0.0)):.2f}",
-        }
-    )
+        rows.append(
+            {
+                "Component": c.get("name", key),
+                "Level": "" if level is None else f"{float(level):.2f}",
+                "Z": "" if z is None else f"{float(z):.2f}",
+                "Trend": trend_txt,
+                "Weight": f"{float(c.get('weight', 0.0)):.2f}",
+            }
+        )
+
 comp_df = pd.DataFrame(rows)
 
-# NEW: Top section with weekly changes + component details (moved to top)
 topL, topR = st.columns([1, 1.35], gap="large")
 
 with topL:
@@ -372,76 +402,77 @@ with topL:
 
         st.markdown("")
         if st.button("Open weekly details", use_container_width=True):
-            st.switch_page("pages/4_Rotation_Setups.py")
+            safe_switch_page("pages/4_Rotation_Setups.py")
 
 with topR:
     with st.container(border=True):
         st.markdown("<div class='me-rowtitle'>Component details</div>", unsafe_allow_html=True)
-        st.dataframe(comp_df, use_container_width=True, hide_index=True)
+        if comp_df.empty:
+            st.caption("No component table available yet.")
+        else:
+            st.dataframe(comp_df, use_container_width=True, hide_index=True)
 
-        # Useful add: component concentration and biggest driver
-        if not comp_df.empty and "Weight" in comp_df.columns:
-            try:
-                w = pd.to_numeric(comp_df["Weight"], errors="coerce").fillna(0.0)
-                top_weight = float(w.max()) if len(w) else 0.0
-                top_name = str(comp_df.loc[w.idxmax(), "Component"]) if len(w) else ""
-                st.caption(f"Highest weight: {top_name} ({top_weight:.2f})")
-            except Exception:
-                pass
+            if "Weight" in comp_df.columns:
+                try:
+                    w = pd.to_numeric(comp_df["Weight"], errors="coerce").fillna(0.0)
+                    top_weight = float(w.max()) if len(w) else 0.0
+                    top_name = str(comp_df.loc[w.idxmax(), "Component"]) if len(w) else ""
+                    st.caption(f"Highest weight: {top_name} ({top_weight:.2f})")
+                except Exception:
+                    pass
 
         st.markdown("")
         if st.button("Open score breakdown", use_container_width=True, key="btn_score_breakdown"):
-            st.switch_page("pages/5_Drivers.py")
+            safe_switch_page("pages/5_Drivers.py")
 
 st.markdown("")
 
-# History (kept, but now below the most actionable info)
 with st.container(border=True):
     st.markdown("<div class='me-rowtitle'>History</div>", unsafe_allow_html=True)
     hist_range = st.selectbox("Range", options=["1y", "5y"], index=0)
     reg_hist = compute_regime_timeseries(macro, px, lookback_trend=63, freq="W-FRI")
-    spy = px["SPY"] if "SPY" in px.columns else pd.Series(dtype=float)
+    spy = px["SPY"] if isinstance(px, pd.DataFrame) and "SPY" in px.columns else pd.Series(dtype=float)
     st.plotly_chart(plot_regime_history(reg_hist, spy, hist_range), use_container_width=True)
 
 st.markdown("")
 
-# Allocation and favored groups (still useful, but below top actionables)
 left, right = st.columns([1, 1], gap="large")
 
 with left:
     with st.container(border=True):
         st.markdown("<div class='me-rowtitle'>Allocation and favored groups</div>", unsafe_allow_html=True)
 
-        stance = regime.allocation.get("stance", {}) if isinstance(regime.allocation, dict) else {}
-        mix = regime.allocation.get("mix", {}) if isinstance(regime.allocation, dict) else {}
-        tilts = regime.allocation.get("tilts", []) if isinstance(regime.allocation, dict) else []
+        alloc = getattr(regime, "allocation", {})
+        stance = alloc.get("stance", {}) if isinstance(alloc, dict) else {}
+        mix = alloc.get("mix", {}) if isinstance(alloc, dict) else {}
 
-        s1, s2, s3, s4, s5 = st.columns(5)
-        s1.metric("Equities", stance.get("Equities", "n/a"))
-        s2.metric("Credit", stance.get("Credit", "n/a"))
-        s3.metric("Duration", stance.get("Duration", "n/a"))
-        s4.metric("USD", stance.get("USD", "n/a"))
-        s5.metric("Commodities", stance.get("Commodities", "n/a"))
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Equities", stance.get("Equities", "n/a"))
+        c2.metric("Credit", stance.get("Credit", "n/a"))
+        c3.metric("Duration", stance.get("Duration", "n/a"))
+        c4.metric("USD", stance.get("USD", "n/a"))
+        c5.metric("Commodities", stance.get("Commodities", "n/a"))
 
         if isinstance(mix, dict) and mix:
             mix_txt = ", ".join([f"{k} {v}%" for k, v in mix.items()])
             st.caption(f"Suggested mix: {mix_txt}")
 
         st.caption("Favored groups")
-        make_chip_row(regime.favored_groups)
+        make_chip_row(getattr(regime, "favored_groups", []) or [])
 
 with right:
     with st.container(border=True):
         st.markdown("<div class='me-rowtitle'>Key drivers</div>", unsafe_allow_html=True)
-        tilts = regime.allocation.get("tilts", []) if isinstance(regime.allocation, dict) else []
+
+        tilts = alloc.get("tilts", []) if isinstance(alloc, dict) else []
         if tilts:
             for t in tilts:
                 st.write(f"• {t}")
         else:
             st.write("• No drivers yet")
 
-        # Useful add: a quick watchlist CTA
         st.markdown("")
         st.caption("Quick watchlist")
-        watch = ["HY OAS", "10y minus 2y", "Real 10y", "Dollar broad"]
-        make_chip_row(watch)
+        make_chip_row(["HY OAS", "10y minus 2y", "Real 10y", "Dollar broad"])
+
+st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)
