@@ -17,12 +17,16 @@ def inject_css():
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
         .block-container {
-          padding-top: 1.2rem;
-          padding-bottom: 2.0rem;
-          max-width: 1200px;
-        }
+  max-width: 1200px;
+  padding-top: 4.8rem;   /* was ~1.2rem */
+  padding-bottom: 2rem;
+}
 
-        /* Make buttons match app look */
+        /* Hide sidebar and its toggle */
+        [data-testid="stSidebar"] { display: none; }
+        [data-testid="collapsedControl"] { display: none; }
+
+        /* Buttons */
         .stButton > button {
           border-radius: 12px !important;
           padding: 0.55rem 0.9rem !important;
@@ -30,16 +34,16 @@ def inject_css():
         }
 
         .me-topbar {
-          position: sticky;
-          top: 0;
-          z-index: 999;
-          background: rgba(255,255,255,0.92);
-          backdrop-filter: blur(10px);
-          border: 1px solid rgba(0,0,0,0.06);
-          border-radius: 16px;
-          padding: 14px 16px;
-          margin-bottom: 14px;
-        }
+  position: sticky;
+  top: 1.5rem;          /* was 0 */
+  z-index: 999;
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
 
         .me-title {
           font-size: 24px;
@@ -368,7 +372,7 @@ with topL:
 
         st.markdown("")
         if st.button("Open weekly details", use_container_width=True):
-            st.switch_page("pages/4_Weekly_Details.py")
+            st.switch_page("pages/4_Rotation_Setups.py")
 
 with topR:
     with st.container(border=True):
