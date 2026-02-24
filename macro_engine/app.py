@@ -22,10 +22,10 @@ def inject_css():
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
         .block-container {
-          padding-top: 1.2rem;
-          padding-bottom: 2.0rem;
-          max-width: 1200px;
-        }
+  max-width: 1200px;
+  padding-top: 4.8rem;   /* was ~1.2rem */
+  padding-bottom: 2rem;
+}
 
         /* Hide sidebar and its toggle */
         [data-testid="stSidebar"] { display: none; }
@@ -39,20 +39,20 @@ def inject_css():
         }
 
         .me-topbar {
-          position: sticky;
-          top: 0;
-          z-index: 999;
-          background: rgba(255,255,255,0.92);
-          backdrop-filter: blur(10px);
-          border: 1px solid rgba(0,0,0,0.06);
-          border-radius: 16px;
-          padding: 14px 16px;
-          margin-bottom: 14px;
-        }
+  position: sticky;
+  top: 1.5rem;          /* was 0 */
+  z-index: 999;
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 20px;
+  padding: 18px 20px;
+  margin-bottom: 20px;
+}
 
         /* Bigger, more title-like */
         .me-title {
-          font-size: 26px;
+          font-size: 30px;
           font-weight: 900;
           letter-spacing: -0.6px;
           margin: 0;
@@ -73,7 +73,7 @@ def inject_css():
           padding: 10px 14px;
           border-radius: 999px;
           border: 1px solid rgba(0,0,0,0.08);
-          font-size: 14px;
+          font-size: 20px;
           font-weight: 900;
           white-space: nowrap;
           background: rgba(0,0,0,0.01);
@@ -166,6 +166,7 @@ def inject_css():
         """,
         unsafe_allow_html=True,
     )
+    
 
 inject_css()
 
