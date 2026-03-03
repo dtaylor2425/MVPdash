@@ -19,11 +19,11 @@ if not FRED_API_KEY:
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=12 * 60 * 60, show_spinner=False)
+@st.cache_data(ttl=30 * 60, show_spinner=False)
 def load_macro() -> pd.DataFrame:
     return get_fred_cached(FRED_SERIES, FRED_API_KEY, CACHE_DIR, cache_name="fred_macro")
 
-@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+@st.cache_data(ttl=30 * 60, show_spinner=False)
 def load_proxies() -> pd.DataFrame:
     tickers = list(dict.fromkeys(list(YF_PROXIES.values())))
     return fetch_prices(tickers, period="5y")
@@ -31,7 +31,9 @@ def load_proxies() -> pd.DataFrame:
 macro = load_macro()
 px    = load_proxies()
 
-last_macro_date = macro.dropna(how="all").index.max()
+# Last real FRED observation: use y10 (daily) as the freshness indicator
+_fred_daily = macro["y10"].dropna() if "y10" in macro.columns else macro.dropna(how="all").index.to_series()
+last_macro_date = _fred_daily.index.max() if not (hasattr(_fred_daily, "empty") and _fred_daily.empty) else macro.index.max()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,15 +54,15 @@ def _vix_series(name: str) -> pd.Series:
 st.markdown(
     f"""<div class="me-topbar">
       <div class="me-title">Macro charts</div>
-      <div class="me-subtle">Last update: {last_macro_date.date() if pd.notna(last_macro_date) else 'unknown'}</div>
+      <div class="me-subtle">FRED data through {last_macro_date.date() if pd.notna(last_macro_date) else 'unknown'}</div>
     </div>""",
     unsafe_allow_html=True,
 )
 
 # ── Deep-link: ?tab=curve|rates|volatility|risk|credit ───────────────────────
 
-TAB_NAMES = ["Curve context", "Rates", "Volatility", "Risk appetite", "Credit and Liquidity"]
-TAB_SLUGS = ["curve", "rates", "volatility", "risk", "credit"]
+TAB_NAMES = ["Curve context", "Rates", "Risk appetite", "Credit and Liquidity"]
+TAB_SLUGS = ["curve", "rates", "risk", "credit"]
 
 _slug = st.query_params.get("tab", "")
 try:
@@ -77,6 +79,13 @@ except ValueError:
 # purely client-side after the first render.  The accepted workaround is to
 # use st.session_state to remember the last tab and note the query param for
 # external linking guidance.  We expose the slug in the URL so bookmarks work.
+
+# Quick link to dedicated volatility page
+_vcol1, _vcol2 = st.columns([4, 1])
+with _vcol2:
+    if st.button("⚡ Volatility View →", use_container_width=True, key="btn_vol_view"):
+        from src.ui import safe_switch_page as _sp
+        _sp("pages/6_Volatility_View.py")
 
 tabs = st.tabs(TAB_NAMES)
 
@@ -256,78 +265,12 @@ with tabs[1]:
         else:
             st.info("Missing dollar index series.")
 
+
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — VOLATILITY
+# TAB 2 — RISK APPETITE
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tabs[2]:
-    st.markdown("<div class='me-rowtitle'>Volatility term structure</div>", unsafe_allow_html=True)
-    st.caption(
-        "**V-Ratio = VIX ÷ VIX3M.** Normally VIX < VIX3M (mean-reversion expectation → V-Ratio < 1). "
-        "V-Ratio > 1 = spot fear exceeds 3-month expectation = **panic mode**. "
-        "V-Ratio < 0.9 with low VIX = complacency."
-    )
-
-    vix_s   = _vix_series("vix")
-    vix3m_s = _vix_series("vix3m")
-    vix6m_s = _vix_series("vix6m")
-
-    if vix_s.empty or vix3m_s.empty:
-        st.warning("VIX or VIX3M data unavailable. Check ^VIX and ^VIX3M are in YF_PROXIES.")
-    else:
-        vix_range = st.selectbox("VIX chart range", RKEYS, index=RKEYS.index("1y"), key="vix_range")
-
-        vix_s   = slice_df(vix_s.to_frame("v"),   vix_range)["v"]
-        vix3m_s = slice_df(vix3m_s.to_frame("v"), vix_range)["v"]
-        if not vix6m_s.empty:
-            vix6m_s = slice_df(vix6m_s.to_frame("v"), vix_range)["v"]
-
-        st.plotly_chart(
-            vix_term_chart(vix_s, vix3m_s, vix6m_s if not vix6m_s.empty else None),
-            use_container_width=True,
-        )
-
-        # Live V-Ratio callout
-        idx = vix_s.index.intersection(vix3m_s.index)
-        if len(idx) > 0:
-            v_last   = float(vix_s.loc[idx[-1]])
-            v3m_last = float(vix3m_s.loc[idx[-1]])
-            vratio   = v_last / v3m_last if v3m_last != 0 else None
-
-            col1, col2, col3 = st.columns(3)
-            col1.metric("VIX (spot)", f"{v_last:.1f}")
-            col2.metric("VIX3M",      f"{v3m_last:.1f}")
-
-            if vratio is not None:
-                if vratio > 1.0:
-                    signal, bg = "🔴 Panic — spot fear > 3m expectation", "#fee2e2"
-                elif vratio > 0.9:
-                    signal, bg = "🟡 Elevated — approaching panic zone", "#fef9c3"
-                else:
-                    signal, bg = "🟢 Calm — market expects mean reversion", "#dcfce7"
-
-                col3.metric("V-Ratio", f"{vratio:.3f}")
-                st.markdown(
-                    f"<div style='margin-top:10px;padding:12px 16px;border-radius:12px;"
-                    f"background:{bg};font-size:14px;font-weight:700;'>{signal}</div>",
-                    unsafe_allow_html=True,
-                )
-
-        st.divider()
-        st.markdown("#### V-Ratio in context")
-        idx_full = vix_s.index.intersection(vix3m_s.index)
-        if len(idx_full) > 5:
-            vr_full  = (vix_s.loc[idx_full] / vix3m_s.loc[idx_full]).dropna()
-            panic_pct = float((vr_full > 1.0).mean() * 100)
-            st.caption(
-                f"In this window, V-Ratio was above 1 on **{panic_pct:.1f}%** of trading days."
-            )
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — RISK APPETITE
-# ══════════════════════════════════════════════════════════════════════════════
-
-with tabs[3]:
     st.markdown("<div class='me-rowtitle'>Risk appetite and breadth</div>", unsafe_allow_html=True)
 
     r1, r2 = st.columns(2)
@@ -365,10 +308,10 @@ with tabs[3]:
             st.info("RSP not available — optional breadth proxy.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — CREDIT AND LIQUIDITY
+# TAB 3 — CREDIT AND LIQUIDITY
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tabs[4]:
+with tabs[3]:
     st.markdown("<div class='me-rowtitle'>Credit and Liquidity</div>", unsafe_allow_html=True)
 
     r1, r2 = st.columns(2)

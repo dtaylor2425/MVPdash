@@ -11,7 +11,7 @@ from src.regime import compute_regime_v3
 from src.compute import component_contribution
 from src.ui import (
     inject_css, sidebar_nav, safe_switch_page,
-    regime_color, delta_badge_html, SCORE_LEGEND_HTML,
+    regime_color, delta_badge_html, SCORE_LEGEND_HTML, html_table,
 )
 
 st.set_page_config(
@@ -79,7 +79,7 @@ def _trend_phrase(name, trend_up):
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+@st.cache_data(ttl=30 * 60, show_spinner=False)
 def load_current_regime():
     if not FRED_API_KEY:
         raise RuntimeError("FRED_API_KEY is not set")
@@ -246,7 +246,13 @@ def get_vix_snapshot(px):
 def load_home_state():
     regime_obj, macro, px = load_current_regime()
     try:
-        last_updated = macro.index.max().date()
+        # Use the last date that has at least one real (non-ffilled) observation.
+        # macro.index.max() after ffill() is today, which is misleading.
+        # Instead find the last row where ANY column has a non-NaN raw value.
+        # Since we write the parquet before ffill, the freshest real date is
+        # the last non-NaN row in the daily-frequency columns (y10, hy_oas etc).
+        _real_dates = macro.dropna(how="all").index
+        last_updated = _real_dates.max().date() if len(_real_dates) else date.today()
     except Exception:
         last_updated = date.today()
     macro_snap, mkt_snap = [], []
@@ -478,12 +484,91 @@ with c_vix:
             st.caption("VIX unavailable — check ^VIX / ^VIX3M in config.")
         st.markdown("")
         if st.button("VIX term structure →", use_container_width=True, key="btn_vix"):
-            safe_switch_page("pages/2_Macro_Charts.py", tab="volatility")
+            safe_switch_page("pages/6_Volatility_View.py")
 
 st.markdown("")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROW 2  ·  Key drivers  |  What changed  |  Component contributions
+# ROW 2  ·  Capital Flow Chart  (full width — catches the eye)
+# ══════════════════════════════════════════════════════════════════════════════
+
+with st.container(border=True):
+    hdr_l, hdr_r = st.columns([3, 1])
+    with hdr_l:
+        st.markdown("<div class='me-rowtitle'>Capital Flow Chart</div>", unsafe_allow_html=True)
+    with hdr_r:
+        if st.button("Rotation setups →", use_container_width=True, key="btn_rot"):
+            safe_switch_page("pages/4_Rotation_Setups.py")
+
+    rs = compute_rs_heatmap(period="1y")
+
+    ctrl_l, ctrl_m, ctrl_r = st.columns([1.2, 1.2, 3.0], gap="medium")
+    with ctrl_l:
+        horizon = st.radio("Focus", ["1w", "1m", "3m"], horizontal=True, index=1, key="rs_focus")
+    with ctrl_m:
+        view = st.radio("View", ["Bar", "Heatmap"], horizontal=True, index=0, key="rs_view")
+    with ctrl_r:
+        leaders, laggards = leaders_laggards(rs, horizon)
+        ltxt = ", ".join(leaders.index.tolist()[:3]) if len(leaders) else "n/a"
+        gtxt = ", ".join(laggards.index.tolist()[:3]) if len(laggards) else "n/a"
+        st.markdown(
+            f"<div class='me-subtle' style='margin-top:6px;'>"
+            f"Leaders: <strong style='color:#1f7a4f;'>{ltxt}</strong>"
+            f" &nbsp;&middot;&nbsp; "
+            f"Laggards: <strong style='color:#b42318;'>{gtxt}</strong></div>",
+            unsafe_allow_html=True,
+        )
+
+    rs_long = (
+        rs.reset_index()
+        .melt(id_vars="index", var_name="Horizon", value_name="RS")
+        .rename(columns={"index": "Ticker"})
+        .dropna()
+    )
+    rs_h = rs_long[rs_long["Horizon"] == horizon]
+
+    if view == "Heatmap":
+        chart = (
+            alt.Chart(rs_h)
+            .mark_rect(cornerRadius=4)
+            .encode(
+                x=alt.X("Horizon:N", title=None),
+                y=alt.Y("Ticker:N", sort=alt.SortField(field="RS", order="descending"), title=None),
+                color=alt.Color("RS:Q", title="RS vs SPY",
+                                scale=alt.Scale(scheme="redblue", domainMid=0)),
+                tooltip=["Ticker", "Horizon",
+                         alt.Tooltip("RS:Q", format="+.2%", title="RS vs SPY")],
+            )
+            .properties(height=380)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        bar_df = rs_h.copy()
+        bar_df["RS"] = pd.to_numeric(bar_df["RS"], errors="coerce")
+        bar_df = bar_df.dropna().sort_values("RS", ascending=False)
+        chart = (
+            alt.Chart(bar_df)
+            .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5,
+                      cornerRadiusBottomLeft=5, cornerRadiusBottomRight=5)
+            .encode(
+                y=alt.Y("Ticker:N", sort="-x", title=None),
+                x=alt.X("RS:Q", title="RS vs SPY", axis=alt.Axis(format="+.1%")),
+                color=alt.condition(
+                    alt.datum.RS > 0,
+                    alt.value("#1f7a4f"),
+                    alt.value("#b42318"),
+                ),
+                tooltip=["Ticker",
+                         alt.Tooltip("RS:Q", format="+.2%", title="RS vs SPY")],
+            )
+            .properties(height=380)
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+st.markdown("")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROW 3  ·  Key drivers  |  Allocation tilt  |  Why this regime
 # ══════════════════════════════════════════════════════════════════════════════
 
 c_drv, c_tilt, c_why = st.columns([1.0, 1.3, 1.2], gap="medium")
@@ -575,85 +660,6 @@ with c_why:
 st.markdown("")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROW 3  ·  Leadership vs SPY  (full width — most actionable)
-# ══════════════════════════════════════════════════════════════════════════════
-
-with st.container(border=True):
-    hdr_l, hdr_r = st.columns([3, 1])
-    with hdr_l:
-        st.markdown("<div class='me-rowtitle'>Leadership vs SPY</div>", unsafe_allow_html=True)
-    with hdr_r:
-        if st.button("Rotation setups →", use_container_width=True, key="btn_rot"):
-            safe_switch_page("pages/4_Rotation_Setups.py")
-
-    rs = compute_rs_heatmap(period="1y")
-
-    ctrl_l, ctrl_m, ctrl_r = st.columns([1.2, 1.2, 3.0], gap="medium")
-    with ctrl_l:
-        horizon = st.radio("Focus", ["1w", "1m", "3m"], horizontal=True, index=1, key="rs_focus")
-    with ctrl_m:
-        view = st.radio("View", ["Heatmap", "Bar"], horizontal=True, index=0, key="rs_view")
-    with ctrl_r:
-        leaders, laggards = leaders_laggards(rs, horizon)
-        ltxt = ", ".join(leaders.index.tolist()[:3]) if len(leaders) else "n/a"
-        gtxt = ", ".join(laggards.index.tolist()[:3]) if len(laggards) else "n/a"
-        st.markdown(
-            f"<div class='me-subtle' style='margin-top:6px;'>"
-            f"Leaders: <strong style='color:#1f7a4f;'>{ltxt}</strong>"
-            f" &nbsp;&middot;&nbsp; "
-            f"Laggards: <strong style='color:#b42318;'>{gtxt}</strong></div>",
-            unsafe_allow_html=True,
-        )
-
-    rs_long = (
-        rs.reset_index()
-        .melt(id_vars="index", var_name="Horizon", value_name="RS")
-        .rename(columns={"index": "Ticker"})
-        .dropna()
-    )
-    rs_h = rs_long[rs_long["Horizon"] == horizon]
-
-    if view == "Heatmap":
-        chart = (
-            alt.Chart(rs_h)
-            .mark_rect(cornerRadius=4)
-            .encode(
-                x=alt.X("Horizon:N", title=None),
-                y=alt.Y("Ticker:N", sort=alt.SortField(field="RS", order="descending"), title=None),
-                color=alt.Color("RS:Q", title="RS vs SPY",
-                                scale=alt.Scale(scheme="redblue", domainMid=0)),
-                tooltip=["Ticker", "Horizon",
-                         alt.Tooltip("RS:Q", format="+.2%", title="RS vs SPY")],
-            )
-            .properties(height=380)
-        )
-        st.altair_chart(chart, use_container_width=True)
-    else:
-        bar_df = rs_h.copy()
-        bar_df["RS"] = pd.to_numeric(bar_df["RS"], errors="coerce")
-        bar_df = bar_df.dropna().sort_values("RS", ascending=False)
-        chart = (
-            alt.Chart(bar_df)
-            .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5,
-                      cornerRadiusBottomLeft=5, cornerRadiusBottomRight=5)
-            .encode(
-                y=alt.Y("Ticker:N", sort="-x", title=None),
-                x=alt.X("RS:Q", title="RS vs SPY", axis=alt.Axis(format="+.1%")),
-                color=alt.condition(
-                    alt.datum.RS > 0,
-                    alt.value("#1f7a4f"),
-                    alt.value("#b42318"),
-                ),
-                tooltip=["Ticker",
-                         alt.Tooltip("RS:Q", format="+.2%", title="RS vs SPY")],
-            )
-            .properties(height=380)
-        )
-        st.altair_chart(chart, use_container_width=True)
-
-st.markdown("")
-
-# ══════════════════════════════════════════════════════════════════════════════
 # ROW 4  ·  Macro snapshot  |  Market returns
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -664,7 +670,10 @@ with c_msnap:
         st.markdown("<div class='me-rowtitle'>Macro snapshot this week</div>", unsafe_allow_html=True)
         macro_df = home["macro_snapshot"]
         if isinstance(macro_df, pd.DataFrame) and not macro_df.empty:
-            st.dataframe(macro_df, use_container_width=True, hide_index=True)
+            def _delta_color(v):
+                return "#1f7a4f" if v > 0 else "#b42318"
+            st.markdown(html_table(macro_df, value_col="\u0394 1w", value_color_fn=_delta_color),
+                        unsafe_allow_html=True)
         else:
             st.caption("Macro snapshot unavailable.")
         st.markdown("")
@@ -676,12 +685,15 @@ with c_mktsnap:
         st.markdown("<div class='me-rowtitle'>Market returns this week</div>", unsafe_allow_html=True)
         mkt_df = home["market_snapshot"]
         if isinstance(mkt_df, pd.DataFrame) and not mkt_df.empty:
-            st.dataframe(mkt_df, use_container_width=True, hide_index=True)
+            def _pct_color(v):
+                return "#1f7a4f" if v > 0 else "#b42318"
+            st.markdown(html_table(mkt_df, value_col="Weekly %", value_color_fn=_pct_color),
+                        unsafe_allow_html=True)
             st.caption("7-day percent return.")
         else:
             st.caption("Market snapshot unavailable.")
         st.markdown("")
-        if st.button("Ticker drilldown →", use_container_width=True, key="btn_ticker"):
-            safe_switch_page("pages/3_Ticker_Detail.py")
+        if st.button("Rotation setups →", use_container_width=True, key="btn_ticker"):
+            safe_switch_page("pages/4_Rotation_Setups.py")
 
 st.markdown("<div style='height:56px;'></div>", unsafe_allow_html=True)

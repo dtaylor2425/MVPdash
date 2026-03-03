@@ -27,12 +27,12 @@ def delta_color(value: float, inverse: bool = False) -> str:
 # ── Navigation ────────────────────────────────────────────────────────────────
 
 _PAGES = {
-    "Home":             "app.py",
-    "Macro charts":     "pages/2_Macro_Charts.py",
-    "Regime deep dive": "pages/1_Regime_Deep_Dive.py",
-    "Rotation & setups":"pages/4_Rotation_Setups.py",
-    "Drivers":          "pages/5_Drivers.py",
-    "Ticker drilldown": "pages/3_Ticker_Detail.py",
+    "Home":              "app.py",
+    "Macro charts":      "pages/2_Macro_Charts.py",
+    "Volatility View":   "pages/6_Volatility_View.py",
+    "Regime deep dive":  "pages/1_Regime_Deep_Dive.py",
+    "Rotation & setups": "pages/4_Rotation_Setups.py",
+    "Drivers":           "pages/5_Drivers.py",
 }
 
 
@@ -90,6 +90,58 @@ def inject_css():
         [data-testid="stAppViewContainer"],
         [data-testid="stAppViewContainer"] > .main {
           background: #ffffff !important;
+        }
+
+        /* ── Widget labels — surgical fix for mobile dark mode ── */
+        /* These are the specific elements that go invisible on mobile;
+           we do NOT touch dataframe cells or plotly which manage their own colours */
+        [data-testid="stRadio"] label,
+        [data-testid="stRadio"] label span,
+        [data-testid="stRadio"] > div > label,
+        [data-baseweb="radio"] ~ div label,
+        .stRadio label { color: rgba(0,0,0,0.85) !important; }
+
+        [data-testid="stSelectbox"] label,
+        [data-testid="stSelectbox"] > label { color: rgba(0,0,0,0.85) !important; }
+
+        [data-baseweb="select"] [data-testid="stMarkdownContainer"] p,
+        [data-baseweb="select"] span:not([data-testid]),
+        [data-baseweb="popover"] li { color: rgba(0,0,0,0.85) !important; }
+
+        [data-baseweb="tab"] span,
+        [data-baseweb="tab-list"] button { color: rgba(0,0,0,0.70) !important; }
+        [data-baseweb="tab"][aria-selected="true"] span { color: rgba(0,0,0,0.90) !important; }
+
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricLabel"] span,
+        [data-testid="stMetricValue"],
+        [data-testid="stMetricValue"] div { color: rgba(0,0,0,0.85) !important; }
+
+        [data-testid="stCaptionContainer"] p { color: rgba(0,0,0,0.55) !important; }
+
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] li { color: rgba(0,0,0,0.85) !important; }
+
+        /* ── Mobile dark mode: only suppress on the specific widget selectors above ── */
+        @media (prefers-color-scheme: dark) {
+          html, body,
+          [data-testid="stAppViewContainer"],
+          [data-testid="stAppViewContainer"] > .main {
+            background: #ffffff !important;
+          }
+          [data-testid="stRadio"] label,
+          [data-testid="stRadio"] label span,
+          .stRadio label,
+          [data-testid="stSelectbox"] label,
+          [data-baseweb="tab"] span,
+          [data-baseweb="tab-list"] button,
+          [data-testid="stMetricLabel"],
+          [data-testid="stMetricLabel"] span,
+          [data-testid="stMetricValue"],
+          [data-testid="stMetricValue"] div,
+          [data-testid="stCaptionContainer"] p,
+          [data-testid="stMarkdownContainer"] p,
+          [data-testid="stMarkdownContainer"] li { color: rgba(0,0,0,0.85) !important; }
         }
 
         .block-container {
@@ -405,6 +457,64 @@ def delta_badge_html(value: float, inverse: bool = False) -> str:
     cls = "me-badge-green" if good else "me-badge-red"
     arrow = "↑" if value > 0 else "↓"
     return f"<span class='me-badge {cls}'>{arrow} {abs(value):.2f}</span>"
+
+
+def html_table(df: "pd.DataFrame", value_col: str | None = None,
+               value_color_fn=None) -> str:
+    """
+    Render a pandas DataFrame as a plain HTML table that is fully controlled
+    by our CSS — no iframe, no shadow DOM, works correctly in both desktop
+    and mobile dark mode.
+
+    value_col:      name of the column whose cells get colour treatment
+    value_color_fn: callable(float) -> hex colour string, applied to value_col
+    """
+    import pandas as pd
+
+    if df is None or df.empty:
+        return "<p style='color:rgba(0,0,0,0.5);font-size:13px;'>No data.</p>"
+
+    header_cells = "".join(
+        f"<th style='text-align:left;padding:7px 10px;font-size:11px;"
+        f"font-weight:700;color:rgba(0,0,0,0.45);text-transform:uppercase;"
+        f"letter-spacing:0.4px;border-bottom:1px solid rgba(0,0,0,0.08);'>{c}</th>"
+        for c in df.columns
+    )
+
+    rows_html = ""
+    for i, row in df.iterrows():
+        cells = ""
+        for col in df.columns:
+            val = row[col]
+            # Decide text colour
+            if col == value_col and value_color_fn is not None:
+                try:
+                    color = value_color_fn(float(val))
+                except Exception:
+                    color = "rgba(0,0,0,0.85)"
+                weight = "800"
+            else:
+                color = "rgba(0,0,0,0.80)"
+                weight = "600"
+            # Format numeric values
+            if isinstance(val, float):
+                display = f"{val:+.2f}" if col == value_col else f"{val:.2f}"
+            else:
+                display = str(val)
+            cells += (
+                f"<td style='padding:7px 10px;font-size:13px;"
+                f"font-weight:{weight};color:{color};'>{display}</td>"
+            )
+        bg = "#fafafa" if i % 2 == 0 else "#ffffff"
+        rows_html += f"<tr style='background:{bg};'>{cells}</tr>"
+
+    return (
+        "<table style='width:100%;border-collapse:collapse;"
+        "border-radius:8px;overflow:hidden;'>"
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{rows_html}</tbody>"
+        "</table>"
+    )
 
 
 def make_chip_row(items: list) -> None:
