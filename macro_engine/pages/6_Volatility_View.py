@@ -346,10 +346,13 @@ with rvol_col:
                     mode="lines", name="Realized vol 21d",
                     line=dict(color="#1d4ed8", width=1.8, dash="dot"),
                 ))
+                _v2 = list(vix_a.values) + list(rvol_a.values)
+                _lo2 = max(0, min(_v2) * 0.88); _hi2 = max(_v2) * 1.12
                 fig2.update_layout(
                     height=300, margin=dict(l=10, r=20, t=20, b=20),
                     plot_bgcolor="white", paper_bgcolor="white",
                     yaxis_title="Annualized vol (%)",
+                    yaxis=dict(range=[_lo2, _hi2]),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
                     hovermode="x unified",
                 )
@@ -404,11 +407,14 @@ with vr_col:
                 fig3.add_hline(y=0.9, line_color="#94a3b8", line_dash="dash",
                                line_width=1, annotation_text="Calm",
                                annotation_position="right")
+                _lo3 = max(0.5, float(vr_hist.min()) * 0.92)
+                _hi3 = max(float(vr_hist.max()) * 1.08, 1.15)
                 fig3.update_layout(
                     height=280, margin=dict(l=10, r=80, t=20, b=20),
                     plot_bgcolor="white", paper_bgcolor="white",
                     showlegend=False, hovermode="x unified",
                     yaxis_title="V-Ratio",
+                    yaxis=dict(range=[_lo3, _hi3]),
                 )
                 fig3.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
                 fig3.update_yaxes(showgrid=True, gridcolor="#f1f5f9")

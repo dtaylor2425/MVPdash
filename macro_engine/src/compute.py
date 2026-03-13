@@ -116,21 +116,24 @@ def trend_flip(series: pd.Series, lookback: int = 63) -> Optional[str]:
     return "up" if now_up == 1 else "down"
 
 
-# ── Component contribution (matches regime.py scoring exactly) ───────────────
+# ── Component contribution (v4 model — contribution stored directly) ─────────
 
 def component_contribution(c: dict) -> float:
     """
     Returns the signed contribution of a regime component to the total score.
-    Uses the pre-computed 'contribution' field stored by regime._compute_core().
-    Falls back to zscore*weight for the dollar component if contribution absent.
+
+    In v4 regime.py every component stores a pre-computed 'contribution' field:
+        contribution = clip(z_score, -2.5, +2.5) × weight  (sign-corrected)
+
+    This is the authoritative value.  Falls back to zscore × weight if
+    contribution is missing (e.g. very old cached RegimeResult).
     """
     if not isinstance(c, dict):
         return 0.0
-    # Primary: use the pre-computed contribution from regime._compute_core()
     contrib = c.get("contribution")
     if isinstance(contrib, (int, float, np.floating)):
         return float(contrib)
-    # Legacy fallback: only dollar has zscore; others default to 0
+    # Fallback for stale cache
     z = c.get("zscore")
     w = c.get("weight")
     if isinstance(z, (int, float, np.floating)) and isinstance(w, (int, float, np.floating)):

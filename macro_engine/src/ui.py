@@ -6,12 +6,31 @@ import streamlit as st
 # ── Colour helpers ────────────────────────────────────────────────────────────
 
 def regime_color(regime: str) -> str:
+    """Dot/text colour for each of the 5 v4 regime labels."""
     r = (regime or "").lower()
-    if r == "risk on":
+    if "risk on" in r:
         return "#1f7a4f"
-    if r == "risk off":
+    if "bullish" in r:
+        return "#16a34a"
+    if "bearish" in r:
+        return "#d97706"
+    if "risk off" in r:
         return "#b42318"
-    return "#6b7280"
+    return "#6b7280"   # Neutral
+
+
+def regime_bg(regime: str) -> str:
+    """Light background pill colour to pair with regime_color."""
+    r = (regime or "").lower()
+    if "risk on" in r:
+        return "#dcfce7"
+    if "bullish" in r:
+        return "#dcfce7"
+    if "bearish" in r:
+        return "#fef9c3"
+    if "risk off" in r:
+        return "#fee2e2"
+    return "#f3f4f6"
 
 
 def delta_color(value: float, inverse: bool = False) -> str:
@@ -27,12 +46,19 @@ def delta_color(value: float, inverse: bool = False) -> str:
 # ── Navigation ────────────────────────────────────────────────────────────────
 
 _PAGES = {
+    # ── Command centre ────────────────────────────────
     "Home":              "app.py",
-    "Macro charts":      "pages/2_Macro_Charts.py",
+    # ── Market views ──────────────────────────────────
+    "Curve View":        "pages/9_Curve_View.py",
     "Volatility View":   "pages/6_Volatility_View.py",
-    "Regime deep dive":  "pages/1_Regime_Deep_Dive.py",
+    "Credit & Macro":    "pages/2_Macro_Charts.py",
+    "Fed & Liquidity":   "pages/10_Fed_Liquidity.py",
+    # ── Tactical ──────────────────────────────────────
+    "Regime Playbook":   "pages/7_Regime_Playbook.py",   # what do I do about it
+    "Transition Watch":  "pages/8_Transition_Watch.py",  # is it about to change
     "Rotation & setups": "pages/4_Rotation_Setups.py",
-    "Drivers":           "pages/5_Drivers.py",
+    # ── Reference ─────────────────────────────────────
+    "Regime deep dive":  "pages/1_Regime_Deep_Dive.py",  # how was score built
 }
 
 
@@ -49,26 +75,101 @@ def safe_switch_page(path: str, tab: str | None = None):
         st.error(f"Missing page: {path}. Check your pages folder.")
 
 
+# Navigation metadata — icons, section headers, descriptions
+_NAV_META = {
+    # page_name: (icon, section, short description)
+    "Home":              ("🏠", "core",      "Command centre"),
+    "Curve View":        ("📐", "markets",   "Yield curve"),
+    "Volatility View":   ("⚡", "markets",   "VIX & stress"),
+    "Credit & Macro":    ("📊", "markets",   "Credit & rates"),
+    "Fed & Liquidity":   ("🏦", "markets",   "Policy stance"),
+    "Regime Playbook":   ("📋", "tactical",  "Actionable signals"),
+    "Transition Watch":  ("🔔", "tactical",  "Regime change alerts"),
+    "Rotation & setups": ("🔄", "tactical",  "Pair signals"),
+    "Regime deep dive":  ("🔍", "reference", "Score breakdown"),
+}
+
+_SECTION_LABELS = {
+    "core":      "",
+    "markets":   "MARKET VIEWS",
+    "tactical":  "TACTICAL",
+    "reference": "REFERENCE",
+}
+
 def sidebar_nav(active: str = "Home"):
-    st.sidebar.title("Macro Engine")
+    # Title block
     st.sidebar.markdown(
-        "<div style='font-size:11px;color:rgba(0,0,0,0.45);margin-bottom:6px;'>Navigation</div>",
+        """<div style="padding:16px 12px 10px;border-bottom:1px solid rgba(0,0,0,0.07);
+            margin-bottom:8px;">
+          <div style="font-size:18px;font-weight:900;letter-spacing:-0.4px;
+                      color:rgba(0,0,0,0.88);">Macro Engine</div>
+          <div style="font-size:10px;color:rgba(0,0,0,0.38);margin-top:2px;
+                      text-transform:uppercase;letter-spacing:0.6px;">
+            Signal · Analysis · Alpha
+          </div>
+        </div>""",
         unsafe_allow_html=True,
     )
+
+    last_section = None
     for name, path in _PAGES.items():
-        is_active = name == active
-        label = f"**{name}**" if is_active else name
-        if st.sidebar.button(label, key=f"sidenav_{name}", use_container_width=True, disabled=is_active):
-            safe_switch_page(path)
+        meta       = _NAV_META.get(name, ("·", "core", ""))
+        icon, section, desc = meta
+        is_active  = name == active
+
+        # Section header
+        if section != last_section and _SECTION_LABELS.get(section):
+            st.sidebar.markdown(
+                f"<div style='font-size:9px;font-weight:700;color:rgba(0,0,0,0.32);"
+                f"letter-spacing:0.8px;text-transform:uppercase;"
+                f"padding:10px 12px 4px;'>{_SECTION_LABELS[section]}</div>",
+                unsafe_allow_html=True,
+            )
+        last_section = section
+
+        # Active vs inactive styling via markdown injection + button
+        if is_active:
+            st.sidebar.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px;"
+                f"padding:8px 12px;margin:1px 0;border-radius:10px;"
+                f"background:rgba(0,0,0,0.07);cursor:default;'>"
+                f"<span style='font-size:14px;'>{icon}</span>"
+                f"<div>"
+                f"  <div style='font-size:12px;font-weight:800;color:rgba(0,0,0,0.88);'>"
+                f"  {name}</div>"
+                f"  <div style='font-size:9px;color:rgba(0,0,0,0.42);'>{desc}</div>"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            # Use a button but style it to look like a nav item
+            clicked = st.sidebar.button(
+                f"{icon}  {name}",
+                key=f"sidenav_{name}",
+                use_container_width=True,
+            )
+            if clicked:
+                safe_switch_page(path)
+
+    st.sidebar.markdown(
+        "<div style='border-top:1px solid rgba(0,0,0,0.06);margin-top:12px;"
+        "padding:10px 12px;'>"
+        "<div style='font-size:9px;color:rgba(0,0,0,0.28);text-transform:uppercase;"
+        "letter-spacing:0.6px;'>Macro Engine v4</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ── Score legend ──────────────────────────────────────────────────────────────
 
 SCORE_LEGEND_HTML = (
-    "<div style='display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;'>"
-    "<span style='font-size:11px;color:#b42318;font-weight:700;'>▼ &lt;40 Bearish</span>"
-    "<span style='font-size:11px;color:#6b7280;font-weight:700;'>● 40–60 Neutral</span>"
-    "<span style='font-size:11px;color:#1f7a4f;font-weight:700;'>▲ &gt;60 Bullish</span>"
+    "<div style='display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;'>"
+    "<span style='font-size:10px;color:#b42318;font-weight:700;'>▼&lt;25 Risk Off</span>"
+    "<span style='font-size:10px;color:#d97706;font-weight:700;'>▼ 25–40 Bearish</span>"
+    "<span style='font-size:10px;color:#6b7280;font-weight:700;'>● 40–60 Neutral</span>"
+    "<span style='font-size:10px;color:#16a34a;font-weight:700;'>▲ 60–75 Bullish</span>"
+    "<span style='font-size:10px;color:#1f7a4f;font-weight:700;'>▲&gt;75 Risk On</span>"
     "</div>"
 )
 
@@ -80,6 +181,13 @@ def inject_css():
         """
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+        /* ── Hide Streamlit auto pages nav (we use our own) ── */
+        [data-testid="stSidebarNav"],
+        [data-testid="stSidebarNavItems"],
+        [data-testid="stSidebarNavSeparator"] {
+          display: none !important;
+        }
 
         /* ── Base ── */
         html, body, [class*="css"] {
@@ -145,9 +253,11 @@ def inject_css():
         }
 
         .block-container {
-          max-width: 1200px;
-          padding-top: 4.8rem;
-          padding-bottom: 5rem;
+          max-width: 1280px;
+          padding-top: 3.5rem;
+          padding-bottom: 4rem;
+          padding-left: 2rem !important;
+          padding-right: 2rem !important;
         }
 
         /* ── Buttons ── */
@@ -165,22 +275,29 @@ def inject_css():
         }
 
         /* ── Sidebar nav buttons ── */
+        [data-testid="stSidebar"] {
+          background: #f9fafb !important;
+        }
         [data-testid="stSidebar"] .stButton > button {
           text-align: left !important;
           border: none !important;
           background: transparent !important;
-          color: rgba(0,0,0,0.75) !important;
-          font-size: 13px !important;
-          padding: 0.4rem 0.7rem !important;
+          color: rgba(0,0,0,0.65) !important;
+          font-size: 12px !important;
+          font-weight: 500 !important;
+          padding: 7px 12px !important;
           border-radius: 8px !important;
+          margin: 1px 0 !important;
+          transition: background 0.12s ease !important;
         }
         [data-testid="stSidebar"] .stButton > button:hover {
-          background: rgba(0,0,0,0.05) !important;
-        }
-        [data-testid="stSidebar"] .stButton > button:disabled {
           background: rgba(0,0,0,0.06) !important;
-          color: rgba(0,0,0,0.85) !important;
-          font-weight: 800 !important;
+          color: rgba(0,0,0,0.88) !important;
+        }
+        /* Remove focus ring on sidebar buttons */
+        [data-testid="stSidebar"] .stButton > button:focus {
+          box-shadow: none !important;
+          outline: none !important;
         }
 
         /* ── Inputs / tables ── */
