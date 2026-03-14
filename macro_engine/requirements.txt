@@ -5,3 +5,4 @@ yfinance
 fredapi
 pyarrow
 plotly
+spicy
