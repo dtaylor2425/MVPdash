@@ -6,3 +6,5 @@ fredapi
 pyarrow
 plotly
 spicy
+anthropic
+src

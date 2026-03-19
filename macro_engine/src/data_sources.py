@@ -6,55 +6,92 @@ from fredapi import Fred
 
 
 def fetch_prices(tickers: list[str], period: str = "5y") -> pd.DataFrame:
+    """
+    Robust yfinance downloader that handles both old and new column formats.
+
+    yfinance >= 0.2.31 changed the MultiIndex structure:
+      Old: columns = MultiIndex[(field, ticker), ...]  — ticker at level 1
+      New: columns = MultiIndex[(ticker, field), ...]  — ticker at level 0
+           OR flat columns when group_by is removed
+
+    We detect which format we got and handle all cases.
+    """
     tickers = [t for t in tickers if isinstance(t, str) and t.strip()]
     tickers = list(dict.fromkeys(tickers))
-
     if not tickers:
         return pd.DataFrame()
 
-    df = yf.download(
-        tickers=tickers,
-        period=period,
-        auto_adjust=True,
-        progress=False,
-        group_by="ticker",
-        threads=True,
-    )
+    try:
+        # New yfinance API — no group_by, returns (ticker, field) MultiIndex
+        df = yf.download(
+            tickers=tickers,
+            period=period,
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+    except Exception:
+        return pd.DataFrame()
 
     if df is None or df.empty:
         return pd.DataFrame()
 
     df.index = pd.to_datetime(df.index)
+    out = {}
 
-    # Case A: single ticker — flat column index
-    if len(tickers) == 1:
-        t = tickers[0]
-        if "Close" in df.columns:
-            return df[["Close"]].rename(columns={"Close": t}).dropna(how="all")
-        if isinstance(df.columns, pd.MultiIndex):
-            if "Close" in df.columns.get_level_values(0):
-                s = df.xs("Close", axis=1, level=0)
-                if isinstance(s, pd.DataFrame) and s.shape[1] >= 1:
-                    col = s.columns[0]
-                    return s[[col]].rename(columns={col: t}).dropna(how="all")
+    # ── MultiIndex columns ────────────────────────────────────────────────────
+    if isinstance(df.columns, pd.MultiIndex):
+        level0 = list(df.columns.get_level_values(0))
+        level1 = list(df.columns.get_level_values(1))
+
+        # Detect orientation: if level0 contains field names like "Close"
+        # we have (field, ticker); if level0 contains tickers we have (ticker, field)
+        field_names = {"Close", "Open", "High", "Low", "Volume", "Adj Close"}
+        if level0[0] in field_names:
+            # Old format: (field, ticker) — ticker at level 1
+            for t in tickers:
+                if t in level1:
+                    try:
+                        s = df.xs(t, axis=1, level=1)
+                        if "Close" in s.columns:
+                            out[t] = s["Close"].dropna()
+                    except Exception:
+                        pass
+        else:
+            # New format: (ticker, field) — ticker at level 0
+            for t in tickers:
+                if t in level0:
+                    try:
+                        sub = df[t]
+                        if isinstance(sub, pd.DataFrame):
+                            # field name varies: "Close" or "close"
+                            for col in ["Close", "close", "Adj Close"]:
+                                if col in sub.columns:
+                                    out[t] = sub[col].dropna()
+                                    break
+                        elif isinstance(sub, pd.Series):
+                            out[t] = sub.dropna()
+                    except Exception:
+                        pass
+
+    # ── Flat columns (single ticker or flattened) ─────────────────────────────
+    else:
+        for col in ["Close", "close", "Adj Close"]:
+            if col in df.columns:
+                if len(tickers) == 1:
+                    out[tickers[0]] = df[col].dropna()
+                else:
+                    # Each column might be a ticker
+                    for t in tickers:
+                        if t in df.columns:
+                            out[t] = df[t].dropna()
+                break
+
+    if not out:
         return pd.DataFrame()
 
-    # Case B: multiple tickers — MultiIndex with ticker at level 0
-    if isinstance(df.columns, pd.MultiIndex):
-        out = {}
-        top_level = df.columns.get_level_values(0)
-        for t in tickers:
-            if t in top_level:
-                sub = df[t]
-                if isinstance(sub, pd.DataFrame) and "Close" in sub.columns:
-                    out[t] = sub["Close"]
-        return pd.DataFrame(out).dropna(how="all")
-
-    # Case C: fallback
-    if "Close" in df.columns:
-        return df[["Close"]].dropna(how="all")
-
-    return pd.DataFrame()
+    result = pd.DataFrame(out)
+    return result.dropna(how="all")
 
 
 from .storage import read_parquet, write_parquet, _parquet_path

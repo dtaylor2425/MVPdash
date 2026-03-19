@@ -59,6 +59,7 @@ _PAGES = {
     "Rotation & setups": "pages/4_Rotation_Setups.py",
     # ── Reference ─────────────────────────────────────
     "Regime deep dive":  "pages/1_Regime_Deep_Dive.py",  # how was score built
+    "Morning Brief":     "pages/0_Morning_Brief.py",
 }
 
 
@@ -87,6 +88,7 @@ _NAV_META = {
     "Transition Watch":  ("🔔", "tactical",  "Regime change alerts"),
     "Rotation & setups": ("🔄", "tactical",  "Pair signals"),
     "Regime deep dive":  ("🔍", "reference", "Score breakdown"),
+    "Morning Brief":     ("☀️", "reference", "Daily synthesis"),
 }
 
 _SECTION_LABELS = {
