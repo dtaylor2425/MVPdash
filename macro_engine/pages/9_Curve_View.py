@@ -193,7 +193,7 @@ with h1:
         unsafe_allow_html=True,
     )
 with h2:
-    if st.button("← Home", use_container_width=True):
+    if st.button("← Home", width='stretch'):
         safe_switch_page("app.py")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -408,7 +408,7 @@ with chart_col:
             )
             fig.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
             fig.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             st.caption("Curve data unavailable.")
 
@@ -515,7 +515,7 @@ with st.container(border=True):
         )
         fig2.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
         fig2.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
     else:
         st.caption("Yield data unavailable.")
 
@@ -560,7 +560,7 @@ with steep_col:
             )
             fig3.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
             fig3.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width='stretch')
 
             # Current regime annotation
             latest_roc = float(roc63.iloc[-1])
@@ -616,7 +616,7 @@ with div_col:
                 fig4.update_yaxes(title_text="HY OAS (%)", secondary_y=True,
                                   showgrid=False)
                 fig4.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
-                st.plotly_chart(fig4, use_container_width=True)
+                st.plotly_chart(fig4, width='stretch')
         else:
             st.caption("Curve or HY OAS data unavailable.")
 

@@ -11,7 +11,7 @@ from src.ui import inject_css, sidebar_nav, safe_switch_page, html_table, regime
 st.set_page_config(page_title="Regime deep dive", page_icon="🔍",
                    layout="wide", initial_sidebar_state="expanded")
 inject_css()
-sidebar_nav(active="Regime deep dive")
+sidebar_nav(active="Regime Engine")
 
 if not FRED_API_KEY:
     st.error("FRED_API_KEY is not set."); st.stop()
@@ -110,7 +110,7 @@ with tleft:
         </div>""",
         unsafe_allow_html=True)
 with tright:
-    if st.button("← Home", use_container_width=True):
+    if st.button("← Home", width='stretch'):
         safe_switch_page("app.py")
 
 st.markdown(
@@ -213,7 +213,7 @@ with topL:
                 f"<span class='me-badge {badge_cls}'>{arrow} {abs(dlt):.2f}</span></div>",
                 unsafe_allow_html=True)
         st.markdown("")
-        if st.button("Open weekly details →", use_container_width=True):
+        if st.button("Open weekly details →", width='stretch'):
             safe_switch_page("pages/4_Rotation_Setups.py")
 
 with topR:
@@ -281,10 +281,10 @@ with topR:
                     )
                     .properties(height=160)
                 )
-                st.altair_chart(bar, use_container_width=True)
+                st.altair_chart(bar, width='stretch')
 
         st.markdown("")
-        if st.button("Score breakdown →", use_container_width=True, key="btn_score_bk"):
+        if st.button("Score breakdown →", width='stretch', key="btn_score_bk"):
             safe_switch_page("pages/5_Drivers.py")
 
 st.markdown("")
@@ -299,7 +299,7 @@ with st.container(border=True):
     reg_hist   = compute_regime_timeseries(macro, px, lookback_trend=63, freq="W-FRI")
     spy_s      = px["SPY"] if isinstance(px,pd.DataFrame) and "SPY" in px.columns \
                  else pd.Series(dtype=float)
-    st.plotly_chart(plot_regime_history(reg_hist, spy_s, hist_range), use_container_width=True)
+    st.plotly_chart(plot_regime_history(reg_hist, spy_s, hist_range), width='stretch')
 
 st.markdown("")
 
@@ -338,7 +338,7 @@ with left:
                         unsafe_allow_html=True)
             st.markdown(chips, unsafe_allow_html=True)
         st.markdown("")
-        if st.button("Regime Playbook →", use_container_width=True, key="btn_playbook"):
+        if st.button("Regime Playbook →", width='stretch', key="btn_playbook"):
             safe_switch_page("pages/7_Regime_Playbook.py")
 
 with right:
@@ -354,7 +354,7 @@ with right:
         else:
             st.caption("No drivers available.")
         st.markdown("")
-        if st.button("Transition Watch →", use_container_width=True, key="btn_tw"):
+        if st.button("Transition Watch →", width='stretch', key="btn_tw"):
             safe_switch_page("pages/8_Transition_Watch.py")
 
 st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)

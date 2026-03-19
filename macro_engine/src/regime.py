@@ -216,18 +216,21 @@ def _allocation_from_components(score: int, components: Dict) -> Dict:
             tilts.append("Curve steep")
 
     # Dollar
+    # Note: dollar_z >= 0.5 means strong dollar — which DRAGS the regime score
+    # (dollar is inverted in scoring) but means USD positions will outperform.
+    # "Favour" = own this, regardless of regime direction.
     usd = "Neutral"
     if isinstance(dollar_z, (int, float)):
         if dollar_z >= 0.5:
-            usd = "Overweight"
-            tilts.append("Dollar strong")
+            usd = "Favour USD"
+            tilts.append("Dollar strong — tightening global conditions")
         elif dollar_z <= -0.5:
-            usd = "Underweight"
-            tilts.append("Dollar weak")
+            usd = "Avoid USD"
+            tilts.append("Dollar weak — tailwind for EM and commodities")
 
     # Commodities
     commodities = "Neutral"
-    if usd == "Underweight" and score >= 55:
+    if usd == "Avoid USD" and score >= 55:
         commodities = "Overweight"
         tilts.append("Weaker dollar supports commodities")
 
@@ -279,9 +282,9 @@ def _favored_groups_from_allocation(score: int, components: Dict, allocation: Di
         groups.append("Credit beta")
     if credit == "Underweight":
         groups.append("Investment grade quality")
-    if usd == "Underweight":
+    if usd == "Avoid USD":
         groups += ["International", "Emerging markets"]
-    if usd == "Overweight":
+    if usd == "Favour USD":
         groups.append("USD beneficiaries")
     if commodities == "Overweight":
         groups += ["Commodities", "Real assets"]
@@ -434,7 +437,7 @@ def _compute_core(
         trend_up    = _trend_dir(series, lookback_trend)
         contrib     = _clip_z(-z) * _WEIGHTS["dollar"]
         components["dollar"] = {
-            "name":        "Dollar impulse",
+            "name":        "Dollar headwind",
             "level":       level,
             "zscore":      z,
             "roc_zscore":  roc_z,
@@ -444,7 +447,7 @@ def _compute_core(
         }
     else:
         missing += 1
-        components["dollar"] = {"name": "Dollar impulse", "weight": _WEIGHTS["dollar"],
+        components["dollar"] = {"name": "Dollar headwind", "weight": _WEIGHTS["dollar"],
                                  "contribution": 0.0}
 
     # ── 6. CPI momentum (inverted — rising inflation = headwind) ───────────

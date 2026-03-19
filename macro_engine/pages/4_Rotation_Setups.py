@@ -533,7 +533,7 @@ with h1:
           </div>
         </div>""", unsafe_allow_html=True)
 with h2:
-    if st.button("← Home", use_container_width=True):
+    if st.button("← Home", width='stretch'):
         safe_switch_page("app.py")
 
 # ── KPI strip ─────────────────────────────────────────────────────────────────
@@ -782,7 +782,7 @@ with rs_col:
                 yaxis=dict(showgrid=False, autorange="reversed"),
                 hovermode="y unified",
             )
-            st.plotly_chart(fig_rs, use_container_width=True)
+            st.plotly_chart(fig_rs, width='stretch')
 
 with rrg_col:
     with st.container(border=True):
@@ -842,7 +842,7 @@ with rrg_col:
                            title="RS momentum (4w)"),
                 hovermode="closest",
             )
-            st.plotly_chart(fig_rrg, use_container_width=True)
+            st.plotly_chart(fig_rrg, width='stretch')
 
 st.markdown("")
 
@@ -890,7 +890,7 @@ with st.container(border=True):
             xaxis=dict(showgrid=False, side="bottom"),
             yaxis=dict(showgrid=False, autorange="reversed"),
         )
-        st.plotly_chart(fig_cop, use_container_width=True)
+        st.plotly_chart(fig_cop, width='stretch')
 
         # Flagged pairs
         flagged = pairs_df[pairs_df["regime_flag"] == True][
@@ -987,7 +987,7 @@ with st.container(border=True):
                     legend=dict(orientation="h", y=1.05, x=0),
                     hovermode="x unified",
                 )
-                st.plotly_chart(fig_e, use_container_width=True)
+                st.plotly_chart(fig_e, width='stretch')
             else:
                 st.caption("Ratio data unavailable for this pair.")
 

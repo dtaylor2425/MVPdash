@@ -785,7 +785,7 @@ with h1:
           </div>
         </div>""", unsafe_allow_html=True)
 with h2:
-    if st.button("← Home", use_container_width=True):
+    if st.button("← Home", width='stretch'):
         safe_switch_page("app.py")
 
 # ── Regime + transition summary strip ─────────────────────────────────────────
@@ -1030,7 +1030,7 @@ with fc2:
             yaxis=dict(autorange="reversed", showgrid=False),
             showlegend=False,
         )
-        st.plotly_chart(fig_fact, use_container_width=True)
+        st.plotly_chart(fig_fact, width='stretch')
 
         # Transition matrix heatmap
         if not markov_mat.empty:
@@ -1060,7 +1060,7 @@ with fc2:
                 xaxis=dict(side="bottom", showgrid=False),
                 yaxis=dict(autorange="reversed", showgrid=False),
             )
-            st.plotly_chart(fig_mk, use_container_width=True)
+            st.plotly_chart(fig_mk, width='stretch')
 
 st.markdown("")
 
@@ -1172,7 +1172,7 @@ with st.container(border=True):
             boxmode="group", hovermode="x unified",
             legend=dict(orientation="h", y=1.05, x=0),
         )
-        st.plotly_chart(fig_box, use_container_width=True)
+        st.plotly_chart(fig_box, width='stretch')
 
 st.markdown("")
 
@@ -1243,6 +1243,6 @@ with st.container(border=True):
                                showgrid=True, gridcolor="#f1f5f9", row=1, col=1)
         fig_hist.update_yaxes(showticklabels=False, showgrid=False, row=2, col=1)
         fig_hist.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
-        st.plotly_chart(fig_hist, use_container_width=True)
+        st.plotly_chart(fig_hist, width='stretch')
 
 st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)

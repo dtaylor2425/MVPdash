@@ -712,7 +712,7 @@ with h1:
           </div>
         </div>""", unsafe_allow_html=True)
 with h2:
-    if st.button("← Home", use_container_width=True):
+    if st.button("← Home", width='stretch'):
         safe_switch_page("app.py")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -970,7 +970,7 @@ with left_col:
             yaxis=dict(showgrid=False),
             showlegend=False,
         )
-        st.plotly_chart(fig_comp, use_container_width=True)
+        st.plotly_chart(fig_comp, width='stretch')
 
 with right_col:
     st.markdown("<div class='me-rowtitle'>What changed this week</div>", unsafe_allow_html=True)
@@ -1115,7 +1115,7 @@ for col, (label, path, key) in zip([n1,n2,n3,n4,n5], [
     ("Fed & Liquidity", "pages/10_Fed_Liquidity.py",  "btn_mb_fed"),
     ("Credit & Macro",  "pages/2_Macro_Charts.py",    "btn_mb_credit"),
 ]):
-    if col.button(label, use_container_width=True, key=key):
+    if col.button(label, width='stretch', key=key):
         safe_switch_page(path)
 
 st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)

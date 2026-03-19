@@ -154,7 +154,7 @@ with h1:
         </div>""",
         unsafe_allow_html=True)
 with h2:
-    if st.button("Regime deep dive →", use_container_width=True):
+    if st.button("Regime deep dive →", width='stretch'):
         safe_switch_page("pages/1_Regime_Deep_Dive.py")
 
 st.markdown(f"<span class='me-pill'>{summary_line}</span>", unsafe_allow_html=True)
@@ -246,7 +246,7 @@ for i, d in enumerate(drivers[:6]):
                 unsafe_allow_html=True)
 
             st.markdown("")
-            if st.button("Open related chart →", key=f"driver_{i}", use_container_width=True):
+            if st.button("Open related chart →", key=f"driver_{i}", width='stretch'):
                 st.session_state["selected_metric"] = d["target"]
                 safe_switch_page("pages/2_Macro_Charts.py")
 
@@ -285,7 +285,7 @@ with decomp_col:
                 )
                 .properties(height=220)
             )
-            st.altair_chart(bar, use_container_width=True)
+            st.altair_chart(bar, width='stretch')
         else:
             st.caption("Component data unavailable.")
 
@@ -316,7 +316,7 @@ with summary_col:
         if summary_extra:
             st.caption(summary_extra)
         st.markdown("")
-        if st.button("Transition Watch →", use_container_width=True, key="btn_tw"):
+        if st.button("Transition Watch →", width='stretch', key="btn_tw"):
             safe_switch_page("pages/8_Transition_Watch.py")
 
 st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)

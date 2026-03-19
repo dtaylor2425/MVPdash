@@ -280,7 +280,7 @@ with hero_l:
           <div style='margin-bottom:10px;'>{SCORE_LEGEND_HTML}</div>
         </div>""", unsafe_allow_html=True)
     st.markdown("")
-    if st.button("Score breakdown →", use_container_width=True, key="btn_score"):
+    if st.button("Score breakdown →", width='stretch', key="btn_score"):
         safe_switch_page("pages/1_Regime_Deep_Dive.py")
 
 with hero_r:
@@ -322,7 +322,7 @@ with hero_r:
             else:
                 st.caption("Component data unavailable.")
             st.markdown("")
-            if st.button("Regime Playbook →", use_container_width=True, key="btn_playbook"):
+            if st.button("Regime Playbook →", width='stretch', key="btn_playbook"):
                 safe_switch_page("pages/7_Regime_Playbook.py")
 
     with hb:
@@ -360,7 +360,7 @@ with hero_r:
                 _signal_row("V-Ratio", f"{vix['vratio']:.3f}", vix["signal"], vc)
 
             st.markdown("")
-            if st.button("Transition Watch →", use_container_width=True, key="btn_tw"):
+            if st.button("Transition Watch →", width='stretch', key="btn_tw"):
                 safe_switch_page("pages/8_Transition_Watch.py")
 
 st.markdown("")
@@ -428,10 +428,10 @@ with chart_l:
             lo = min(vals_hy) - max((max(vals_hy)-min(vals_hy))*0.12, 0.05)
             hi = max(vals_hy) + max((max(vals_hy)-min(vals_hy))*0.12, 0.05)
             fig_hy.update_yaxes(range=[lo, hi])
-            st.plotly_chart(fig_hy, use_container_width=True)
+            st.plotly_chart(fig_hy, width='stretch')
         else:
             st.caption("HY OAS unavailable.")
-        if st.button("Credit & Macro →", use_container_width=True, key="btn_credit"):
+        if st.button("Credit & Macro →", width='stretch', key="btn_credit"):
             safe_switch_page("pages/2_Macro_Charts.py")
 
 # Chart 2 — 2s10s Yield curve
@@ -473,10 +473,10 @@ with chart_m:
             lo_c = min(vals_cv) - max((max(vals_cv)-min(vals_cv))*0.15, 0.05)
             hi_c = max(vals_cv) + max((max(vals_cv)-min(vals_cv))*0.15, 0.05)
             fig_cv.update_yaxes(range=[lo_c, hi_c])
-            st.plotly_chart(fig_cv, use_container_width=True)
+            st.plotly_chart(fig_cv, width='stretch')
         else:
             st.caption("Curve data unavailable.")
-        if st.button("Curve View →", use_container_width=True, key="btn_curve"):
+        if st.button("Curve View →", width='stretch', key="btn_curve"):
             safe_switch_page("pages/9_Curve_View.py")
 
 # What changed
@@ -503,7 +503,7 @@ with chart_r:
         else:
             st.caption("Weekly changes unavailable.")
         st.markdown("")
-        if st.button("Morning Brief →", use_container_width=True, key="btn_brief"):
+        if st.button("Morning Brief →", width='stretch', key="btn_brief"):
             safe_switch_page("pages/0_Morning_Brief.py")
 
 st.markdown("")
@@ -525,26 +525,26 @@ NAV_CARDS = [
      "Ranked trade signals · Kelly sizing · factor rotation · divergence alerts",
      "pages/7_Regime_Playbook.py", "#1d4ed8", "#eff6ff"),
     ("🔔", "Transition Watch",
-     "Markov transition probabilities · score trajectory · flip scenarios",
+     "Markov transitions · score trajectory · flip scenarios · degrade risk",
      "pages/8_Transition_Watch.py", "#d97706", "#fef9c3"),
+    ("🏦", "Fed & Liquidity",
+     "Balance sheet impulse · real rate path · dollar cycle · policy stance",
+     "pages/10_Fed_Liquidity.py", "#0e7490", "#ecfeff"),
     ("📐", "Curve View",
      "Full term structure · steepener/flattener type · real rate decomposition",
      "pages/9_Curve_View.py", "#1f7a4f", "#dcfce7"),
     ("⚡", "Volatility View",
      "VIX term structure · V-Ratio · realized vol · stress regimes",
      "pages/6_Volatility_View.py", "#7c3aed", "#f5f3ff"),
-    ("🏦", "Fed & Liquidity",
-     "Balance sheet impulse · real rate path · dollar cycle · policy stance",
-     "pages/10_Fed_Liquidity.py", "#0e7490", "#ecfeff"),
     ("📊", "Credit & Macro",
-     "HY OAS bands · curve vs credit · breadth ratios · inflation proxies",
+     "HY OAS percentile bands · credit vs equity · breadth · inflation proxies",
      "pages/2_Macro_Charts.py", "#b42318", "#fee2e2"),
     ("🔄", "Rotation & Setups",
      "Pair signals · Clayton copula risk · RRG quadrant · pair explorer",
      "pages/4_Rotation_Setups.py", "#f97316", "#fff7ed"),
-    ("☀️", "Morning Brief",
-     "Dominant trade · thesis · falsification conditions · daily synthesis",
-     "pages/0_Morning_Brief.py", "#6b7280", "#f8fafc"),
+    ("🔍", "Regime Engine",
+     "Score breakdown · component z-scores · drivers · allocation output",
+     "pages/1_Regime_Deep_Dive.py", "#6b7280", "#f8fafc"),
 ]
 
 nav_cols = st.columns(4, gap="medium")
@@ -560,7 +560,7 @@ for i, (icon, title, desc, path, color, bg) in enumerate(NAV_CARDS):
             f"</div>"
             f"<div style='font-size:11px;color:rgba(0,0,0,0.55);line-height:1.4;'>{desc}</div>"
             f"</div>", unsafe_allow_html=True)
-        if col.button(f"Open →", key=f"nav_{i}", use_container_width=True):
+        if col.button(f"Open →", key=f"nav_{i}", width='stretch'):
             safe_switch_page(path)
 
 st.markdown("")
@@ -612,9 +612,9 @@ with rs_col:
             tooltip=["Ticker", alt.Tooltip("RS:Q", format="+.2%", title="RS vs SPY")],
         ).properties(height=300)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width='stretch')
 
-    if st.button("Rotation & setups →", use_container_width=False, key="btn_rot"):
+    if st.button("Rotation & setups →", width='content', key="btn_rot"):
         safe_switch_page("pages/4_Rotation_Setups.py")
 
 with mkt_col:
@@ -641,7 +641,7 @@ with mkt_col:
         else:
             st.caption("Market data unavailable.")
         st.markdown("")
-        if st.button("Fed & Liquidity →", use_container_width=True, key="btn_fed"):
+        if st.button("Fed & Liquidity →", width='stretch', key="btn_fed"):
             safe_switch_page("pages/10_Fed_Liquidity.py")
 
 st.markdown("<div style='height:48px;'></div>", unsafe_allow_html=True)

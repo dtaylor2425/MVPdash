@@ -222,7 +222,7 @@ with chart_col:
             v6s = slice_df(vix6m_s.to_frame("v"), vix_range)["v"] if not vix6m_s.empty else pd.Series(dtype=float)
             st.plotly_chart(
                 vix_term_chart(vs, v3s, v6s if not v6s.empty else None),
-                use_container_width=True,
+                width='stretch',
             )
 
 with table_col:
@@ -308,7 +308,7 @@ with hist_col:
                 )
                 fig.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
                 fig.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
             else:
                 st.caption("Not enough history for percentile calculation.")
         else:
@@ -358,7 +358,7 @@ with rvol_col:
                 )
                 fig2.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
                 fig2.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width='stretch')
             else:
                 st.caption("Not enough SPY data for realized vol.")
         else:
@@ -418,7 +418,7 @@ with vr_col:
                 )
                 fig3.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
                 fig3.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
-                st.plotly_chart(fig3, use_container_width=True)
+                st.plotly_chart(fig3, width='stretch')
                 st.caption(
                     f"Panic days in window: **{panic_days}** of {total_days} "
                     f"({100*panic_days/total_days:.1f}%)"
@@ -462,7 +462,7 @@ with credit_col:
                 fig4.update_yaxes(title_text="HY OAS (%)", secondary_y=True,
                                   showgrid=False)
                 fig4.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
-                st.plotly_chart(fig4, use_container_width=True)
+                st.plotly_chart(fig4, width='stretch')
         else:
             st.caption("VIX or HY OAS unavailable.")
 

@@ -48,18 +48,18 @@ def delta_color(value: float, inverse: bool = False) -> str:
 _PAGES = {
     # ── Command centre ────────────────────────────────
     "Home":              "app.py",
+    "Morning Brief":     "pages/0_Morning_Brief.py",
+    # ── Analysis ──────────────────────────────────────
+    "Regime Playbook":   "pages/7_Regime_Playbook.py",
+    "Transition Watch":  "pages/8_Transition_Watch.py",
     # ── Market views ──────────────────────────────────
+    "Fed & Liquidity":   "pages/10_Fed_Liquidity.py",
     "Curve View":        "pages/9_Curve_View.py",
     "Volatility View":   "pages/6_Volatility_View.py",
     "Credit & Macro":    "pages/2_Macro_Charts.py",
-    "Fed & Liquidity":   "pages/10_Fed_Liquidity.py",
-    # ── Tactical ──────────────────────────────────────
-    "Regime Playbook":   "pages/7_Regime_Playbook.py",   # what do I do about it
-    "Transition Watch":  "pages/8_Transition_Watch.py",  # is it about to change
     "Rotation & setups": "pages/4_Rotation_Setups.py",
     # ── Reference ─────────────────────────────────────
-    "Regime deep dive":  "pages/1_Regime_Deep_Dive.py",  # how was score built
-    "Morning Brief":     "pages/0_Morning_Brief.py",
+    "Regime Engine":     "pages/1_Regime_Deep_Dive.py",
 }
 
 
@@ -80,21 +80,21 @@ def safe_switch_page(path: str, tab: str | None = None):
 _NAV_META = {
     # page_name: (icon, section, short description)
     "Home":              ("🏠", "core",      "Command centre"),
+    "Morning Brief":     ("☀️", "core",      "Daily synthesis"),
+    "Regime Playbook":   ("📋", "analysis",  "Actionable signals"),
+    "Transition Watch":  ("🔔", "analysis",  "Regime change alerts"),
+    "Fed & Liquidity":   ("🏦", "markets",   "Policy backbone"),
     "Curve View":        ("📐", "markets",   "Yield curve"),
     "Volatility View":   ("⚡", "markets",   "VIX & stress"),
-    "Credit & Macro":    ("📊", "markets",   "Credit & rates"),
-    "Fed & Liquidity":   ("🏦", "markets",   "Policy stance"),
-    "Regime Playbook":   ("📋", "tactical",  "Actionable signals"),
-    "Transition Watch":  ("🔔", "tactical",  "Regime change alerts"),
-    "Rotation & setups": ("🔄", "tactical",  "Pair signals"),
-    "Regime deep dive":  ("🔍", "reference", "Score breakdown"),
-    "Morning Brief":     ("☀️", "reference", "Daily synthesis"),
+    "Credit & Macro":    ("📊", "markets",   "Credit & spreads"),
+    "Rotation & setups": ("🔄", "markets",   "Pair signals"),
+    "Regime Engine":     ("🔍", "reference", "Score breakdown"),
 }
 
 _SECTION_LABELS = {
     "core":      "",
+    "analysis":  "ANALYSIS",
     "markets":   "MARKET VIEWS",
-    "tactical":  "TACTICAL",
     "reference": "REFERENCE",
 }
 
@@ -148,7 +148,7 @@ def sidebar_nav(active: str = "Home"):
             clicked = st.sidebar.button(
                 f"{icon}  {name}",
                 key=f"sidenav_{name}",
-                use_container_width=True,
+                width='stretch',
             )
             if clicked:
                 safe_switch_page(path)

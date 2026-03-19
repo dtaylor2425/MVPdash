@@ -204,7 +204,7 @@ with h1:
           </div>
         </div>""", unsafe_allow_html=True)
 with h2:
-    if st.button("← Home", use_container_width=True):
+    if st.button("← Home", width='stretch'):
         safe_switch_page("app.py")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -436,7 +436,7 @@ with rr_col:
                                  annotation_text=f"Now: {real_now:.2f}%",
                                  annotation_position="right", annotation_font_color=rc)
             fig_rr.update_yaxes(range=[lo_r-pad_r, hi_r+pad_r], title_text="Real yield (%)")
-            st.plotly_chart(fig_rr, use_container_width=True)
+            st.plotly_chart(fig_rr, width='stretch')
         else:
             st.caption("Real yield data unavailable.")
 
@@ -480,7 +480,7 @@ with bs_col_w:
                                  hovermode="x unified", barmode="relative")
             fig_bs.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
             fig_bs.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
-            st.plotly_chart(fig_bs, use_container_width=True)
+            st.plotly_chart(fig_bs, width='stretch')
         else:
             st.caption("Fed balance sheet data unavailable.")
 
@@ -524,7 +524,7 @@ with inf_col:
                                   line_width=1, annotation_text="2% target",
                                   annotation_position="right", annotation_font_size=9)
             fig_inf.update_yaxes(range=[lo_i-pad_i, hi_i+pad_i], title_text="% YoY")
-            st.plotly_chart(fig_inf, use_container_width=True)
+            st.plotly_chart(fig_inf, width='stretch')
         else:
             st.caption("Inflation data unavailable.")
 
@@ -564,7 +564,7 @@ with liq_col:
                 yaxis2=dict(overlaying="y", side="right", title="IWM/SPY",
                             showgrid=False, showticklabels=True),
             )
-            st.plotly_chart(fig_dl, use_container_width=True)
+            st.plotly_chart(fig_dl, width='stretch')
         else:
             st.caption("Dollar data unavailable.")
 

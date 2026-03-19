@@ -138,7 +138,7 @@ with h1:
         unsafe_allow_html=True,
     )
 with h2:
-    if st.button("← Home", use_container_width=True):
+    if st.button("← Home", width='stretch'):
         safe_switch_page("app.py")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -223,7 +223,7 @@ with traj_col:
                 showgrid=True, gridcolor="#f1f5f9",
             )
             fig_traj.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
-            st.plotly_chart(fig_traj, use_container_width=True)
+            st.plotly_chart(fig_traj, width='stretch')
 
             # Table of recent scores
             score_rows = ""
@@ -407,7 +407,7 @@ with st.container(border=True):
                     yaxis=dict(showgrid=False, zeroline=False,
                                showticklabels=True, tickfont=dict(size=9)),
                 )
-                st.plotly_chart(fig_sp, use_container_width=True)
+                st.plotly_chart(fig_sp, width='stretch')
     else:
         st.caption("Component z-score history unavailable.")
 
@@ -615,7 +615,7 @@ with st.container(border=True):
         )
         fig_full.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
         fig_full.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
-        st.plotly_chart(fig_full, use_container_width=True)
+        st.plotly_chart(fig_full, width='stretch')
     else:
         st.caption("Not enough history.")
 
