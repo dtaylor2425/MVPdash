@@ -1095,6 +1095,17 @@ with st.container(border=True):
     st.markdown("<div class='me-rowtitle'>What breaks the thesis</div>",
                 unsafe_allow_html=True)
     st.caption("Monitor these levels. If they hit, the thesis is wrong.")
+    st.markdown(
+        "<div style='padding:9px 14px;border-radius:9px;background:#f8fafc;"
+        "border-left:3px solid #1d4ed8;font-size:12px;line-height:1.6;"
+        "color:rgba(0,0,0,0.65);margin-bottom:10px;'>"
+        "These are not predictions — they are falsification conditions. "
+        "A good macro trade has a pre-defined level where you accept the thesis is wrong. "
+        "Checking these weekly forces discipline: if the level hits, you exit or reduce, "
+        "regardless of your conviction. The moment you start rationalising why the level "
+        "does not matter, the trade has become an opinion, not an analysis."
+        "</div>",
+        unsafe_allow_html=True)
     fc_cols = st.columns(len(falsification_conditions) or 1, gap="medium")
     for i, (main, detail) in enumerate(falsification_conditions):
         fc_cols[i].markdown(
