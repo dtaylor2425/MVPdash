@@ -222,6 +222,79 @@ with topR:
                     unsafe_allow_html=True)
         st.caption("Z (level) = z-score of the indicator vs trailing 252d · Z (mom) = z-score of 63d rate of change · "
                    "Contrib = contribution to score (clipped z × weight, sign-corrected)")
+
+        # ── Component interpretation cards ────────────────────────────────────
+        def _comp_interp(key, name, z, contrib, level):
+            """Return plain-English interpretation of each component's current state."""
+            if z is None: return None
+            z = float(z); contrib = float(contrib or 0)
+            direction = "bullish" if contrib > 0 else "bearish"
+            col = "#1f7a4f" if contrib > 0 else "#b42318"
+            bg  = "rgba(31,122,79,0.04)" if contrib > 0 else "rgba(180,35,24,0.04)"
+
+            interps = {
+                "credit": {
+                    "pos": f"HY OAS is tightening (z {z:+.2f}) — credit markets are not pricing stress. "
+                           "Tight spreads historically support equity multiples and risk appetite.",
+                    "neg": f"HY OAS is elevated or widening (z {z:+.2f}) — credit stress is building. "
+                           "Spreads lead equities by 4-8 weeks. This is the most important bearish signal.",
+                },
+                "real_yields": {
+                    "pos": f"Real yield z-score is {z:+.2f} — conditions are easing in real terms. "
+                           "Falling real rates expand equity multiples and support gold and duration.",
+                    "neg": f"Real yield at {level:.2f}% (z {z:+.2f}) is in restrictive territory. "
+                           "Every 100bp of real yield compresses equity P/E by roughly 1-2x. "
+                           "This is the primary headwind on the score.",
+                },
+                "curve": {
+                    "pos": f"Curve slope z {z:+.2f} — a steepening curve signals improving growth expectations. "
+                           "Steep curve historically precedes credit tightening, cyclical outperformance, and higher equities.",
+                    "neg": f"Curve z {z:+.2f} — flattening or inverted. Bear flattener means the market prices "
+                           "Fed tightening without growth. This regime historically precedes credit stress by 6-12 months.",
+                },
+                "risk_appetite": {
+                    "pos": f"IWM/SPY ratio z {z:+.2f} — small caps leading large caps. Broad participation "
+                           "signals genuine risk appetite rather than a narrow mega-cap rally.",
+                    "neg": f"IWM/SPY ratio z {z:+.2f} — small caps lagging. Breadth is narrowing, which historically "
+                           "precedes broader market weakness. The rally is concentrated.",
+                },
+                "dollar": {
+                    "pos": f"Dollar z {z:+.2f} is weakening — a falling dollar eases global financial conditions, "
+                           "supports EM and commodities, and historically tailwinds risk assets.",
+                    "neg": f"Dollar z {z:+.2f} is elevated or strengthening — a strong dollar tightens global "
+                           "liquidity conditions. It acts as a global margin call for dollar-denominated borrowers.",
+                },
+                "cpi_momentum": {
+                    "pos": f"Inflation momentum z {z:+.2f} is fading — easing price pressure gives the Fed "
+                           "room to pause or cut, which is historically bullish for both bonds and equities.",
+                    "neg": f"Inflation momentum z {z:+.2f} is elevated or re-accelerating — sticky inflation "
+                           "keeps the Fed hawkish, compresses real returns, and is a headwind for duration.",
+                },
+            }
+            key_clean = key.replace("_", "").lower()
+            for k, v in interps.items():
+                if k in key_clean or k in (name or "").lower():
+                    text = v["pos"] if contrib >= 0 else v["neg"]
+                    return col, bg, text
+            return col, bg, f"{name} contributing {contrib:+.3f} to the score (z {z:+.2f})."
+
+        if not comp_df.empty and isinstance(comps, dict):
+            st.markdown("<div class='me-rowtitle' style='margin-top:14px;'>What each signal means right now</div>",
+                        unsafe_allow_html=True)
+            for key, c in comps.items():
+                if not isinstance(c, dict): continue
+                result = _comp_interp(
+                    key, c.get("name",""), c.get("zscore"), c.get("contribution",0), c.get("level")
+                )
+                if not result: continue
+                col, bg, text = result
+                st.markdown(
+                    f"<div style='padding:10px 14px;border-radius:10px;background:{bg};"
+                    f"border-left:3px solid {col};margin-bottom:6px;font-size:12px;"
+                    f"line-height:1.6;color:rgba(0,0,0,0.78);'>"
+                    f"<span style='font-weight:800;color:{col};'>{c.get('name',key)}</span>"
+                    f" — {text}</div>",
+                    unsafe_allow_html=True)
         if comp_df.empty:
             st.caption("No component data yet.")
         else:
