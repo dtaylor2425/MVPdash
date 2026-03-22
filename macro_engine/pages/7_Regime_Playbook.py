@@ -833,6 +833,80 @@ st.caption(
     f"Only shows assets where all signals agree. "
     f"n = weeks in this regime historically.")
 
+# ── Contextual banner: how to use these signals ───────────────────────────────
+_n_longs  = int((trade_df["direction"]=="long").sum())  if not trade_df.empty else 0
+_n_shorts = int((trade_df["direction"]=="short").sum()) if not trade_df.empty else 0
+_top_kelly = float(trade_df["kelly_25"].max()) if not trade_df.empty else 0
+_trans_pen = 1 - degrade_prob * 0.5
+
+if degrade_prob > 0.35:
+    _play_context = (
+        f"⚠ Elevated regime transition risk ({degrade_prob:.0%} degrade probability) is suppressing "
+        f"the Kelly sizes by {(1-_trans_pen):.0%} across all signals. "
+        "When the regime may be about to change, position sizing should shrink — "
+        "the transition penalty enforces this automatically. "
+        "Treat current signals as directionally valid but size at 50-60% of normal."
+    )
+    _play_col = "#d97706"; _play_bg = "#fef9c3"
+elif _n_longs >= 4 and _n_shorts == 0:
+    _play_context = (
+        f"{_n_longs} long signals with no short signals — the macro environment is broadly bullish. "
+        "In this regime, systematic long exposure is confirmed by multiple independent signals. "
+        f"Maximum Kelly fraction available: {_top_kelly:.1%}. "
+        "The confluence approach means each signal (regime, curve, vol, Fed, momentum, mean-reversion) "
+        "votes independently — when 5-6 agree, the historical win rate is highest."
+    )
+    _play_col = "#1f7a4f"; _play_bg = "#dcfce7"
+elif _n_shorts >= 3:
+    _play_context = (
+        f"{_n_shorts} short signals — the macro environment is showing stress. "
+        "Short signals in this model mean the regime, credit, and volatility signals all point to "
+        "risk reduction. These are not pure short trades but risk-off allocations: "
+        "shift from beta to quality, reduce duration risk in credit, favour defensives."
+    )
+    _play_col = "#b42318"; _play_bg = "#fee2e2"
+else:
+    _play_context = (
+        "The alpha score combines six independent signals: regime direction, curve regime, "
+        "volatility regime, Fed/liquidity stance, price momentum, and mean-reversion risk. "
+        "Each votes +1 or -1. Confluence ≥ 4/6 is required to show a signal. "
+        "The Kelly fraction tells you how much of a standard position to take — "
+        "6/6 confluence with a 65% historical win rate produces a larger Kelly than "
+        "4/6 confluence with a 55% win rate."
+    )
+    _play_col = "#6b7280"; _play_bg = "#f3f4f6"
+
+st.markdown(
+    f"<div style='padding:11px 16px;border-radius:11px;background:{_play_bg};"
+    f"border-left:4px solid {_play_col};font-size:12px;color:rgba(0,0,0,0.75);"
+    f"line-height:1.6;margin-bottom:12px;'>{_play_context}</div>",
+    unsafe_allow_html=True)
+
+# ── How to read signal dots ───────────────────────────────────────────────────
+with st.expander("How to read the signal cards"):
+    st.markdown("""
+**Signal dots** (R C V F M Z) — each letter represents one of six independent signals:
+- **R** — Regime direction: does the current macro score favour this asset?
+- **C** — Curve regime: is the yield curve slope supportive?
+- **V** — Volatility regime: is vol in a state consistent with this trade?
+- **F** — Fed/liquidity stance: is the balance sheet impulse aligned?
+- **M** — Momentum: is the asset's own price trend confirming the macro signal?
+- **Z** — Mean-reversion: is the asset at an extreme that increases reversion risk?
+
+Green = signal confirms the trade. Red = signal contradicts. Grey = neutral.
+
+**Win rate** — fraction of weeks historically where this asset posted a positive 4-week 
+forward return in the current regime label. Computed from actual price data, not assumed.
+
+**Kelly 25%** — fractional Kelly position size. Kelly% = W - (1-W)/R where W = win rate, 
+R = avg win / avg loss. Multiplied by 0.25 (fractional Kelly) to account for model uncertainty. 
+A Kelly of 8% means take 8% of your normal position size for this trade.
+
+**⚠ Unvalidated** — the confluence fires but historical data in this regime does not support 
+the direction with sufficient win rate. These signals are shown for awareness but should not 
+be acted on without additional confirmation.
+    """)
+
 if not trade_df.empty:
     # Top longs and shorts
     # Validated = history supports the confluence direction
