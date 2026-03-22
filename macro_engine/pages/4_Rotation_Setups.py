@@ -581,6 +581,64 @@ st.caption(
     "pairs where both assets crash together are penalised. "
     "λ_L = lower tail dependence (high = risky pair trade in drawdowns).")
 
+# ── How to read pair signals ──────────────────────────────────────────────────
+_n_strong   = int((pairs_df["conviction"] == "Strong").sum())  if not pairs_df.empty else 0
+_n_flagged  = int(pairs_df["regime_flag"].sum()) if not pairs_df.empty and "regime_flag" in pairs_df.columns else 0
+_top_score  = float(pairs_df["adj_score"].abs().max()) if not pairs_df.empty else 0
+
+if _n_flagged > 4:
+    _mkt_context = (
+        f"⚠ {_n_flagged} pairs are showing anomalous correlation regimes. "
+        "When pairs that are normally decorrelated start moving together, "
+        "it signals a stress event or macro shift is forcing correlation. "
+        "These pairs carry hidden tail risk — the copula penalty has been applied but "
+        "consider reducing position sizes on flagged pairs by 30-50%."
+    )
+    _ctx_color = "#d97706"; _ctx_bg = "#fef9c3"
+elif _n_strong >= 6:
+    _mkt_context = (
+        f"{_n_strong} strong pair signals — above average rotation opportunity. "
+        "Multiple pairs with high conviction suggests a clear sector rotation is underway. "
+        "Strong signals with low λ_L (tail dependence) are the cleanest trades: "
+        "momentum is present and the pair is structurally decorrelated in drawdowns."
+    )
+    _ctx_color = "#1f7a4f"; _ctx_bg = "#dcfce7"
+else:
+    _mkt_context = (
+        "Pair signals interpret relative momentum between assets in the basket. "
+        "A score of +65 or above (Strong) means momentum, trend, and confirmation all align. "
+        "The copula adjustment penalises pairs where both assets tend to crash together — "
+        "a high raw score on a high-λ_L pair is a weaker trade than a moderate score on a low-λ_L pair."
+    )
+    _ctx_color = "#6b7280"; _ctx_bg = "#f3f4f6"
+
+st.markdown(
+    f"<div style='padding:11px 16px;border-radius:11px;background:{_ctx_bg};"
+    f"border-left:4px solid {_ctx_color};font-size:12px;color:rgba(0,0,0,0.75);"
+    f"line-height:1.6;margin-bottom:12px;'>{_mkt_context}</div>",
+    unsafe_allow_html=True)
+
+# ── What the copula stats mean ────────────────────────────────────────────────
+with st.expander("How to read the copula stats on each card"):
+    st.markdown("""
+**λ_L (lower tail dependence)** — the probability that both assets in the pair fall simultaneously 
+during a market stress event. Derived from a fitted Clayton copula, which captures left-tail 
+dependence that standard correlation misses.
+
+- **λ_L < 0.15** — structurally decorrelated in drawdowns. The pair is a clean relative value trade.
+- **λ_L 0.15–0.35** — moderate tail dependence. Use standard position sizing.
+- **λ_L > 0.35** — both legs tend to fall together in drawdowns. Score is penalised 15-25%.
+
+**⚠ REGIME flag** — the current 63-day rolling correlation is materially above the copula's expected 
+level. This means the pair is in a forced co-movement state — they are moving together more than 
+their long-run relationship predicts. This often snaps back but makes the trade higher risk 
+in the near term.
+
+**Raw vs adjusted score** — the raw score is the pure signal. The adjusted score reflects the 
+copula penalty. A large gap (e.g. Raw +80, Adj +58) means the signal is strong but the risk 
+structure is unfavourable. Prefer pairs where raw and adjusted scores are close.
+    """)
+
 if not pairs_df.empty:
     def _dedup_by_ticker(df_in: pd.DataFrame, n: int = 9) -> pd.DataFrame:
         """Walk the ranked list and keep a row only if:
