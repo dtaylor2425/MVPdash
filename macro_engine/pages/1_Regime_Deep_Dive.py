@@ -278,10 +278,10 @@ with topR:
                     return col, bg, text
             return col, bg, f"{name} contributing {contrib:+.3f} to the score (z {z:+.2f})."
 
-        if not comp_df.empty and isinstance(comps, dict):
+        if not comp_df.empty and isinstance(components, dict):
             st.markdown("<div class='me-rowtitle' style='margin-top:14px;'>What each signal means right now</div>",
                         unsafe_allow_html=True)
-            for key, c in comps.items():
+            for key, c in components.items():
                 if not isinstance(c, dict): continue
                 result = _comp_interp(
                     key, c.get("name",""), c.get("zscore"), c.get("contribution",0), c.get("level")
