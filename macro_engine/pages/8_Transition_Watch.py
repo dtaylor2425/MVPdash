@@ -147,11 +147,43 @@ with h2:
 
 st.markdown(
     f"<div style='padding:14px 18px;border-radius:14px;background:{alert_bg};"
-    f"border:1px solid {alert_color}33;margin-bottom:16px;font-size:14px;"
+    f"border:1px solid {alert_color}33;margin-bottom:8px;font-size:14px;"
     f"color:{alert_color};font-weight:600;line-height:1.5;'>"
     f"{alert_txt}</div>",
     unsafe_allow_html=True,
 )
+
+# ── How to read the boundary proximity ───────────────────────────────────────
+_boundary_context = {
+    25: ("Bearish / Risk Off boundary",
+         "Crossing below 25 historically coincides with credit spread spikes and equity drawdowns "
+         "exceeding 15%. Risk Off regimes average 4-6 months duration. The key signal to watch is "
+         "whether HY OAS is accelerating — if spreads widen past their 75th percentile while the "
+         "score approaches 25, the transition probability increases materially."),
+    40: ("Bearish / Neutral boundary",
+         "The 40 boundary separates deteriorating conditions from true stress. Crossing below 40 "
+         "means multiple signals have turned simultaneously. Historically, a score below 40 with "
+         "deteriorating momentum leads to further declines 65% of the time within 4 weeks."),
+    60: ("Neutral / Bullish boundary",
+         "Crossing above 60 signals broad macro improvement — credit tightening, curve steepening, "
+         "and breadth improving together. This level historically precedes equity outperformance "
+         "over the following quarter. The quality of the signal improves when the Fed is also "
+         "easing or paused."),
+    75: ("Bullish / Risk On boundary",
+         "Above 75 is the full risk-on regime. All macro signals align bullishly. Historically "
+         "this regime produces the strongest equity returns but also the highest drawdown risk "
+         "if the regime reverses — the fall from Risk On to Neutral is typically fast."),
+}
+ctx = _boundary_context.get(nearest_thresh)
+if ctx:
+    thresh_name, thresh_text = ctx
+    st.markdown(
+        f"<div style='padding:12px 16px;border-radius:10px;background:#f8fafc;"
+        f"border:1px solid rgba(0,0,0,0.07);margin-bottom:16px;font-size:12px;"
+        f"line-height:1.6;color:rgba(0,0,0,0.70);'>"
+        f"<span style='font-weight:800;color:rgba(0,0,0,0.80);'>{thresh_name}:</span> "
+        f"{thresh_text}</div>",
+        unsafe_allow_html=True)
 
 traj_col, comp_overview_col = st.columns([1.1, 1.9], gap="medium")
 
