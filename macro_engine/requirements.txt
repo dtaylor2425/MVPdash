@@ -7,4 +7,3 @@ pyarrow
 plotly
 spicy
 anthropic
-src
