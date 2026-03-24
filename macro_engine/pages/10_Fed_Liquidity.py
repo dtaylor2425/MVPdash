@@ -713,8 +713,8 @@ with st.container(border=True):
                 showlegend=False,
             ))
         fig.update_layout(
-            height=190,
-            margin=dict(l=10, r=70, t=6, b=6),
+            height=340,
+            margin=dict(l=10, r=80, t=6, b=6),
             plot_bgcolor=BB_BG, paper_bgcolor=BB_PAPER,
             showlegend=False, hovermode="x unified",
             hoverlabel=dict(bgcolor="#1e1e1e", font_color=BB_TEXT, font_size=10),
@@ -742,30 +742,126 @@ with st.container(border=True):
     if has_nom:
         _panel_label("NOMINAL 5Y5Y FORWARD  —  where 10y Treasury yields expected 5-10y from now",
                      BB_SUBTEXT)
-        fig_nom = _bb_panel(fwd_5y5y_nom, BB_ORANGE, "NOM 5Y5Y", fwd5y5y_nom_now)
-        if fig_nom:
-            st.plotly_chart(fig_nom, width='stretch')
+        _nom_col, _nom_interp = st.columns([2.2, 1.0], gap="medium")
+        with _nom_col:
+            fig_nom = _bb_panel(fwd_5y5y_nom, BB_ORANGE, "NOM 5Y5Y", fwd5y5y_nom_now)
+            if fig_nom:
+                st.plotly_chart(fig_nom, width='stretch')
+        with _nom_interp:
+            _nom_now = fwd5y5y_nom_now or 0
+            if _nom_now > 5.0:
+                _nom_read = ("ELEVATED. Nominal forward rates signal the market expects higher growth AND inflation long-term. Headwind for TLT. USD supportive. Equity discount rates rise.")
+                _nom_c = "#e84040"
+            elif _nom_now > 4.5:
+                _nom_read = ("ABOVE NEUTRAL. Market pricing a structurally higher rate environment. Equity multiples compress vs the zero-rate era. Favour value over growth.")
+                _nom_c = BB_ORANGE
+            else:
+                _nom_read = ("CONTAINED. Bond market not pricing a structural rate repricing. Supportive for growth equities and long duration (TLT).")
+                _nom_c = "#4aba6e"
+            st.markdown(
+                f"<div style='background:#111111;border:1px solid #1e1e1e;"
+                f"border-left:3px solid {_nom_c};border-radius:6px;"
+                f"padding:14px 14px;height:100%;margin-top:20px;'>"
+                f"<div style='font-size:9px;font-weight:700;color:{BB_SUBTEXT};"
+                f"font-family:Courier New,monospace;letter-spacing:0.8px;margin-bottom:8px;'>"
+                f"INTERPRETATION</div>"
+                f"<div style='font-size:11px;color:{_nom_c};"
+                f"font-family:Courier New,monospace;line-height:1.7;margin-bottom:10px;'>"
+                f"{_nom_read}</div>"
+                f"<div style='font-size:10px;color:{BB_SUBTEXT};"
+                f"font-family:Courier New,monospace;line-height:1.6;border-top:1px solid #1e1e1e;padding-top:8px;'>"
+                f"RISING → tighter financial conditions forward, bearish for duration<br>"
+                f"FALLING → rate normalisation narrative, bullish for TLT + growth</div>"
+                f"</div>", unsafe_allow_html=True)
 
     # ── Chart 2: Implied inflation 5y5y ──────────────────────────────────────
     if has_inf:
         _panel_label("IMPLIED INFLATION 5Y5Y  —  nominal minus real · the Fed's preferred long-run gauge",
                      BB_SUBTEXT)
-        fig_inf2 = _bb_panel(
-            fwd_5y5y_inf, BB_ORANGE, "INFL 5Y5Y", fwd5y5y_now,
-            thresholds=[(2.5, "2.5% UNANCHORED", BB_RED),
-                        (2.0, "2.0% TARGET",     BB_GREEN)],
-            fill=True)
-        if fig_inf2:
-            st.plotly_chart(fig_inf2, width='stretch')
+        _inf_col, _inf_interp = st.columns([2.2, 1.0], gap="medium")
+        with _inf_col:
+            fig_inf2 = _bb_panel(
+                fwd_5y5y_inf, BB_ORANGE, "INFL 5Y5Y", fwd5y5y_now,
+                thresholds=[(2.5, "2.5% UNANCHORED", BB_RED),
+                            (2.0, "2.0% TARGET",     BB_GREEN)],
+                fill=True)
+            if fig_inf2:
+                st.plotly_chart(fig_inf2, width='stretch')
+        with _inf_interp:
+            _inf_now = fwd5y5y_now or 0
+            _inf_1w  = fwd5y5y_1w  or 0
+            if _inf_now > 2.5:
+                _inf_read = (f"UNANCHORED at {_inf_now:.2f}%. The Fed cannot cut without reigniting expectations. Bearish for bonds. Bullish for GLD, TIPS, and energy. Dollar supported.")
+                _inf_c = "#e84040"
+            elif _inf_now > 2.3:
+                _inf_read = (f"ELEVATED at {_inf_now:.2f}% — approaching the danger zone. Fed unlikely to cut here. Mild headwind for long duration. GLD and TIPS outperform.")
+                _inf_c = BB_ORANGE
+            elif _inf_now > 2.0:
+                _inf_read = (f"ANCHORED at {_inf_now:.2f}% — within the Fed's acceptable range. Neutral for bonds. Balanced backdrop. Rate normalisation path intact.")
+                _inf_c = "#4aba6e"
+            else:
+                _inf_read = (f"LOW at {_inf_now:.2f}% — below target. Opens door for Fed cuts without inflation concern. Bullish for TLT and growth. Bearish for inflation hedges.")
+                _inf_c = "#4aba6e"
+            _move_note = ""
+            if abs(_inf_1w) > 0.03:
+                _move_note = (f"<br><br>{'↑ RISING' if _inf_1w > 0 else '↓ FALLING'} {abs(_inf_1w):.2f}pp this week — "
+                              f"{'watch for breakout above 2.5%' if _inf_now > 2.3 and _inf_1w > 0 else 'improving signal for duration' if _inf_1w < 0 else 'notable weekly move'}.")
+            st.markdown(
+                f"<div style='background:#111111;border:1px solid #1e1e1e;"
+                f"border-left:3px solid {_inf_c};border-radius:6px;"
+                f"padding:14px 14px;height:100%;margin-top:20px;'>"
+                f"<div style='font-size:9px;font-weight:700;color:{BB_SUBTEXT};"
+                f"font-family:Courier New,monospace;letter-spacing:0.8px;margin-bottom:8px;'>"
+                f"INTERPRETATION · MOST IMPORTANT</div>"
+                f"<div style='font-size:11px;color:{_inf_c};"
+                f"font-family:Courier New,monospace;line-height:1.7;margin-bottom:10px;'>"
+                f"{_inf_read}{_move_note}</div>"
+                f"<div style='font-size:10px;color:{BB_SUBTEXT};"
+                f"font-family:Courier New,monospace;line-height:1.6;border-top:1px solid #1e1e1e;padding-top:8px;'>"
+                f"&gt;2.5% → Fed trapped, real assets win<br>"
+                f"2.0–2.5% → balanced, watch direction<br>"
+                f"&lt;2.0% → cuts on the table, bonds win</div>"
+                f"</div>", unsafe_allow_html=True)
 
     # ── Chart 3: Real 5y5y ───────────────────────────────────────────────────
     if has_real:
         _panel_label("REAL 5Y5Y FORWARD  —  r* expectations · real borrowing cost 5-10y out",
                      BB_SUBTEXT)
-        fig_real = _bb_panel(fwd_5y5y_real, BB_BLUE, "REAL 5Y5Y", fwd5y5y_real_now,
-                             fill=True)
-        if fig_real:
-            st.plotly_chart(fig_real, width='stretch')
+        _real_col, _real_interp = st.columns([2.2, 1.0], gap="medium")
+        with _real_col:
+            fig_real = _bb_panel(fwd_5y5y_real, BB_BLUE, "REAL 5Y5Y", fwd5y5y_real_now,
+                                 fill=True)
+            if fig_real:
+                st.plotly_chart(fig_real, width='stretch')
+        with _real_interp:
+            _real_now = fwd5y5y_real_now or 0
+            if _real_now > 2.0:
+                _real_read = (f"ELEVATED r* at {_real_now:.2f}%. Structurally higher neutral rate. Every +100bp real = ~1-2x P/E compression. Bullish USD and cash. Bearish long-duration growth.")
+                _real_c = "#e84040"
+            elif _real_now > 1.0:
+                _real_read = (f"MODERATE r* at {_real_now:.2f}%. Above pre-pandemic norms. USD supported. Headwind for leveraged balance sheets. Value outperforms growth historically.")
+                _real_c = BB_ORANGE
+            elif _real_now > 0:
+                _real_read = (f"CONTAINED r* at {_real_now:.2f}%. Real neutral rate positive but not restrictive. Balanced — growth equities can perform if earnings support multiples.")
+                _real_c = "#4aba6e"
+            else:
+                _real_read = (f"NEGATIVE r* at {_real_now:.2f}%. Most bullish regime for equities, GLD, and real assets. Signals sustained accommodation. Bearish USD.")
+                _real_c = "#4aba6e"
+            st.markdown(
+                f"<div style='background:#111111;border:1px solid #1e1e1e;"
+                f"border-left:3px solid {_real_c};border-radius:6px;"
+                f"padding:14px 14px;height:100%;margin-top:20px;'>"
+                f"<div style='font-size:9px;font-weight:700;color:{BB_SUBTEXT};"
+                f"font-family:Courier New,monospace;letter-spacing:0.8px;margin-bottom:8px;'>"
+                f"INTERPRETATION</div>"
+                f"<div style='font-size:11px;color:{_real_c};"
+                f"font-family:Courier New,monospace;line-height:1.7;margin-bottom:10px;'>"
+                f"{_real_read}</div>"
+                f"<div style='font-size:10px;color:{BB_SUBTEXT};"
+                f"font-family:Courier New,monospace;line-height:1.6;border-top:1px solid #1e1e1e;padding-top:8px;'>"
+                f"REAL rising faster than INFL = growth driving rates (good for equities)<br>"
+                f"INFL rising faster than REAL = inflation driving rates (bad for bonds)</div>"
+                f"</div>", unsafe_allow_html=True)
 
     st.caption(
         "Nominal 5y5y = 2×DGS10 − DGS5 · "
