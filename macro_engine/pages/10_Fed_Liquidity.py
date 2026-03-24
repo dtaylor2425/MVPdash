@@ -44,6 +44,7 @@ def _col(name):
 
 fed_assets = _col("fed_assets")
 real10     = _col("real10")
+real5      = _col("real5")
 dollar     = _col("dollar_broad")
 y10        = _col("y10")
 y5         = _col("y5")
@@ -56,13 +57,34 @@ cpi_yoy   = (cpi_raw.pct_change(12) * 100).dropna() if len(cpi_raw) >= 13 else N
 breakeven = (y10 - real10).dropna() if len(y10) > 10 and len(real10) > 10 \
             else pd.Series(dtype=float)
 
-# 5y5y forward rate (par yield approximation: 2×10y − 5y)
-# The Fed's preferred long-run inflation gauge. Above 2.5% = unanchored.
-fwd_5y5y = pd.Series(dtype=float)
+# ── Three forward rate series ────────────────────────────────────────────────
+# Nominal 5y5y  = 2×10y − 5y          → where Treasury yields expected 5-10y out
+# Real 5y5y     = 2×real10 − real5     → real growth/rate expectations 5-10y out
+# Inflation 5y5y = nominal − real      → implied inflation expectations 5-10y out
+#                                         THIS is what the TIPS desk talks about
+#                                         Fed target ~2.0%, concern >2.5%
+
+fwd_5y5y_nom  = pd.Series(dtype=float)  # nominal
+fwd_5y5y_real = pd.Series(dtype=float)  # real (inflation-adjusted)
+fwd_5y5y_inf  = pd.Series(dtype=float)  # implied inflation forward
+
 if len(y10) > 10 and len(y5) > 10:
-    _idx = y10.index.intersection(y5.index)
-    if len(_idx) > 10:
-        fwd_5y5y = (2 * y10.loc[_idx] - y5.loc[_idx]).dropna()
+    _idx_n = y10.index.intersection(y5.index)
+    if len(_idx_n) > 10:
+        fwd_5y5y_nom = (2 * y10.loc[_idx_n] - y5.loc[_idx_n]).dropna()
+
+if len(real10) > 10 and len(real5) > 10:
+    _idx_r = real10.index.intersection(real5.index)
+    if len(_idx_r) > 10:
+        fwd_5y5y_real = (2 * real10.loc[_idx_r] - real5.loc[_idx_r]).dropna()
+
+if not fwd_5y5y_nom.empty and not fwd_5y5y_real.empty:
+    _idx_i = fwd_5y5y_nom.index.intersection(fwd_5y5y_real.index)
+    if len(_idx_i) > 10:
+        fwd_5y5y_inf = (fwd_5y5y_nom.loc[_idx_i] - fwd_5y5y_real.loc[_idx_i]).dropna()
+
+# Keep fwd_5y5y as alias for inflation forward (the most important one)
+fwd_5y5y = fwd_5y5y_inf if not fwd_5y5y_inf.empty else fwd_5y5y_nom
 fed_roc13 = fed_assets.pct_change(63).dropna() * 100  if len(fed_assets) >= 70  else None
 fed_roc26 = fed_assets.pct_change(126).dropna() * 100 if len(fed_assets) >= 130 else None
 fed_z     = None
@@ -116,7 +138,9 @@ cpi_3m        = _delta(cpi_yoy, 91) if cpi_yoy is not None else None
 ff_now        = _last(ff)
 be_now        = _last(breakeven)
 be_3m         = _delta(breakeven, 91)
-fwd5y5y_now   = _last(fwd_5y5y)      if not fwd_5y5y.empty else None
+fwd5y5y_now   = _last(fwd_5y5y_inf) if not fwd_5y5y_inf.empty else _last(fwd_5y5y_nom)
+fwd5y5y_nom_now = _last(fwd_5y5y_nom) if not fwd_5y5y_nom.empty else None
+fwd5y5y_real_now = _last(fwd_5y5y_real) if not fwd_5y5y_real.empty else None
 fwd5y5y_1w    = _delta(fwd_5y5y, 7)  if not fwd_5y5y.empty else None
 fwd5y5y_1m    = _delta(fwd_5y5y, 30) if not fwd_5y5y.empty else None
 
@@ -604,84 +628,177 @@ st.markdown("")
 # ROW 4 — 5y5y FORWARD (full width, dedicated chart)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ROW 4 — 5y5y FORWARD: dual panel (nominal top, real + inflation bottom)
+# ══════════════════════════════════════════════════════════════════════════════
+
 with st.container(border=True):
-    st.markdown("<div class='me-rowtitle'>5y5y forward inflation rate — the Fed's long-run gauge</div>",
+    st.markdown("<div class='me-rowtitle'>5y5y forward rates — nominal · real · implied inflation</div>",
                 unsafe_allow_html=True)
 
-    _fwd_kpi_c = ("#e84040" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
-                  ("#4aba6e" if (fwd5y5y_now and fwd5y5y_now < 2.0) else "#f79400"))
-    _fwd_kpi_lbl = ("UNANCHORED" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
-                    ("ANCHORED"  if (fwd5y5y_now and fwd5y5y_now < 2.0) else "IN RANGE"))
+    # ── KPI strip ──────────────────────────────────────────────────────────────
+    _inf_c = ("#e84040" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
+              ("#4aba6e" if (fwd5y5y_now and fwd5y5y_now < 2.0) else BB_ORANGE))
+    _inf_lbl = ("UNANCHORED" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
+                ("ANCHORED"  if (fwd5y5y_now and fwd5y5y_now < 2.0) else "IN RANGE"))
 
-    k1, k2, k3, k4 = st.columns(4, gap="small")
-    for col, label, val, sub in [
-        (k1, "5Y5Y NOW",    f"{fwd5y5y_now:.3f}%" if fwd5y5y_now else "—", _fwd_kpi_lbl),
-        (k2, "1W CHANGE",   f"{fwd5y5y_1w:+.3f}pp" if fwd5y5y_1w else "—", "week on week"),
-        (k3, "1M CHANGE",   f"{fwd5y5y_1m:+.3f}pp" if fwd5y5y_1m else "—", "month on month"),
-        (k4, "10Y BREAKEVEN", f"{be_now:.3f}%" if be_now else "—", "near-term exp"),
-    ]:
-        vc = _fwd_kpi_c if "NOW" in label else ("#e84040" if (val and "+" in str(val)) else
-             ("#4aba6e" if (val and "-" in str(val)) else BB_TEXT))
+    k1, k2, k3, k4, k5 = st.columns(5, gap="small")
+    _kpis = [
+        (k1, "INFL 5Y5Y",  fwd5y5y_now,      _inf_lbl,        _inf_c),
+        (k2, "NOM 5Y5Y",   fwd5y5y_nom_now,   "nominal fwd",   BB_ORANGE),
+        (k3, "REAL 5Y5Y",  fwd5y5y_real_now,  "real fwd (r*)", BB_BLUE),
+        (k4, "1W CHANGE",  fwd5y5y_1w,        "infl fwd Δ",   "#e84040" if (fwd5y5y_1w and fwd5y5y_1w>0) else "#4aba6e"),
+        (k5, "10Y BE",     be_now,             "near-term exp", BB_SUBTEXT),
+    ]
+    for col, label, val, sub, vc in _kpis:
+        v_str = f"{val:.3f}%" if val is not None else "—"
+        if label in ("1W CHANGE",) and val is not None:
+            v_str = f"{val:+.3f}pp"
         col.markdown(
             f"<div style='padding:10px 12px;border-radius:8px;"
             f"background:#111111;border:1px solid #1e1e1e;'>"
             f"<div style='font-size:9px;font-weight:700;color:{BB_SUBTEXT};"
             f"font-family:Courier New,monospace;letter-spacing:0.8px;"
             f"margin-bottom:4px;'>{label}</div>"
-            f"<div style='font-size:20px;font-weight:900;color:{vc};"
-            f"font-family:Courier New,monospace;'>{val}</div>"
+            f"<div style='font-size:18px;font-weight:900;color:{vc};"
+            f"font-family:Courier New,monospace;'>{v_str}</div>"
             f"<div style='font-size:9px;color:{BB_SUBTEXT};"
             f"font-family:Courier New,monospace;margin-top:2px;'>{sub}</div>"
             f"</div>", unsafe_allow_html=True)
 
     st.markdown("")
-    fwd_range = st.selectbox("Range", RKEYS, index=RKEYS.index("2y") if "2y" in RKEYS else RKEYS.index("1y"),
+
+    fwd_range = st.selectbox("Range", RKEYS,
+                              index=RKEYS.index("2y") if "2y" in RKEYS else RKEYS.index("1y"),
                               key="fwd_range")
-    if not fwd_5y5y.empty:
-        fwd_sl_main = slice_series(fwd_5y5y, fwd_range)
-        be_sl_main  = slice_series(breakeven, fwd_range) if not breakeven.empty else None
 
-        if not fwd_sl_main.empty:
-            fig_fwd = _fig_bb(300)
-            # Threshold bands
-            fig_fwd.add_hrect(y0=2.5, y1=4.0, fillcolor="rgba(232,64,64,0.07)", line_width=0)
-            fig_fwd.add_hrect(y0=0.0, y1=2.0, fillcolor="rgba(74,186,110,0.07)", line_width=0)
+    # ── Dual panel chart ───────────────────────────────────────────────────────
+    # Top panel: Nominal 5y5y  (range ~3.5–5.5%)
+    # Bottom panel: Real 5y5y + Implied inflation 5y5y  (range ~1.5–3.0%)
+    # Separate axes so neither series gets squashed
 
-            # 5y5y line — main series in Bloomberg amber
-            fig_fwd.add_trace(go.Scatter(
-                x=fwd_sl_main.index, y=fwd_sl_main.values,
-                mode="lines", name="5Y5Y FWD",
-                line=dict(color=BB_ORANGE, width=2.2),
-                fill="tozeroy", fillcolor="rgba(247,148,0,0.07)"))
+    has_nom  = not fwd_5y5y_nom.empty
+    has_real = not fwd_5y5y_real.empty
+    has_inf  = not fwd_5y5y_inf.empty
 
-            # 10y breakeven overlay
-            if be_sl_main is not None and not be_sl_main.empty:
+    if has_nom or has_inf:
+        fig_fwd = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.48, 0.52], vertical_spacing=0.06,
+            subplot_titles=["NOMINAL 5Y5Y FORWARD", "REAL 5Y5Y  &  IMPLIED INFLATION FORWARD"])
+
+        # ── TOP: Nominal 5y5y ────────────────────────────────────────────────
+        if has_nom:
+            nom_sl = slice_series(fwd_5y5y_nom, fwd_range)
+            if not nom_sl.empty:
                 fig_fwd.add_trace(go.Scatter(
-                    x=be_sl_main.index, y=be_sl_main.values,
-                    mode="lines", name="10Y BREAKEVEN",
-                    line=dict(color=BB_BLUE, width=1.4, dash="dot")))
+                    x=nom_sl.index, y=nom_sl.values,
+                    mode="lines", name="NOM 5Y5Y",
+                    line=dict(color=BB_ORANGE, width=2.0),
+                    fill="tozeroy", fillcolor="rgba(247,148,0,0.07)"),
+                    row=1, col=1)
+                lo_n = float(nom_sl.min()); hi_n = float(nom_sl.max())
+                pad_n = max((hi_n - lo_n) * 0.20, 0.10)
+                if fwd5y5y_nom_now:
+                    fig_fwd.add_hline(y=fwd5y5y_nom_now,
+                                      line_color=BB_YELLOW, line_width=1.2, line_dash="dot",
+                                      annotation_text=f"  NOW: {fwd5y5y_nom_now:.3f}%",
+                                      annotation_font_color=BB_YELLOW, annotation_font_size=9,
+                                      annotation_font_family="'Courier New', monospace",
+                                      annotation_position="right", row=1, col=1)
+                fig_fwd.update_yaxes(range=[lo_n-pad_n, hi_n+pad_n],
+                                     title_text="NOM %",
+                                     title_font=dict(size=9, color=BB_SUBTEXT),
+                                     tickfont=dict(size=9, color=BB_TEXT,
+                                                   family="'Courier New', monospace"),
+                                     showgrid=True, gridcolor=BB_GRID,
+                                     side="right", row=1, col=1)
 
-            # Threshold lines
-            _bb_threshold(fig_fwd, 2.5, "2.5% UNANCHORED ZONE", BB_RED)
-            _bb_threshold(fig_fwd, 2.0, "2.0% FED TARGET", BB_GREEN)
-            _bb_now_line(fig_fwd, fwd5y5y_now, "5Y5Y", BB_YELLOW)
+        # ── BOTTOM: Real 5y5y + Implied inflation ────────────────────────────
+        if has_real:
+            real_sl = slice_series(fwd_5y5y_real, fwd_range)
+            if not real_sl.empty:
+                fig_fwd.add_trace(go.Scatter(
+                    x=real_sl.index, y=real_sl.values,
+                    mode="lines", name="REAL 5Y5Y",
+                    line=dict(color=BB_BLUE, width=1.8)),
+                    row=2, col=1)
 
-            # Dynamic y range
-            all_v = list(fwd_sl_main.values)
-            if be_sl_main is not None and not be_sl_main.empty:
-                all_v += list(be_sl_main.values)
-            lo_f = min(all_v); hi_f = max(all_v)
-            pad_f = max((hi_f - lo_f) * 0.18, 0.1)
-            fig_fwd.update_yaxes(range=[lo_f-pad_f, hi_f+pad_f],
-                                  title_text="RATE %",
-                                  title_font=dict(size=9, color=BB_SUBTEXT))
-            st.plotly_chart(fig_fwd, width='stretch')
+        if has_inf:
+            inf_sl = slice_series(fwd_5y5y_inf, fwd_range)
+            if not inf_sl.empty:
+                fig_fwd.add_trace(go.Scatter(
+                    x=inf_sl.index, y=inf_sl.values,
+                    mode="lines", name="INFL 5Y5Y",
+                    line=dict(color=BB_ORANGE, width=2.0)),
+                    row=2, col=1)
+
+                # Threshold bands on bottom panel
+                fig_fwd.add_hrect(y0=2.5, y1=5.0,
+                                  fillcolor="rgba(232,64,64,0.06)", line_width=0,
+                                  row=2, col=1)
+                fig_fwd.add_hrect(y0=0.0, y1=2.0,
+                                  fillcolor="rgba(74,186,110,0.06)", line_width=0,
+                                  row=2, col=1)
+                # Threshold lines
+                for lvl, lbl, lc in [(2.5,"2.5% UNANCHORED",BB_RED),(2.0,"2.0% TARGET",BB_GREEN)]:
+                    fig_fwd.add_hline(y=lvl, line_color=lc, line_width=0.8, line_dash="dash",
+                                      annotation_text=f"  {lbl}",
+                                      annotation_font_color=BB_SUBTEXT, annotation_font_size=8,
+                                      annotation_font_family="'Courier New', monospace",
+                                      annotation_position="right", row=2, col=1)
+                if fwd5y5y_now:
+                    fig_fwd.add_hline(y=fwd5y5y_now,
+                                      line_color=BB_YELLOW, line_width=1.2, line_dash="dot",
+                                      annotation_text=f"  INFL NOW: {fwd5y5y_now:.3f}%",
+                                      annotation_font_color=BB_YELLOW, annotation_font_size=9,
+                                      annotation_font_family="'Courier New', monospace",
+                                      annotation_position="right", row=2, col=1)
+
+                # Dynamic y for bottom panel — fit real and inflation together
+                bot_vals = []
+                if has_real:
+                    r2 = slice_series(fwd_5y5y_real, fwd_range)
+                    if not r2.empty: bot_vals += list(r2.values)
+                bot_vals += list(inf_sl.values)
+                if bot_vals:
+                    lo_b = min(bot_vals); hi_b = max(bot_vals)
+                    pad_b = max((hi_b - lo_b) * 0.20, 0.10)
+                    fig_fwd.update_yaxes(range=[lo_b-pad_b, hi_b+pad_b],
+                                         title_text="RATE %",
+                                         title_font=dict(size=9, color=BB_SUBTEXT),
+                                         tickfont=dict(size=9, color=BB_TEXT,
+                                                       family="'Courier New', monospace"),
+                                         showgrid=True, gridcolor=BB_GRID,
+                                         side="right", row=2, col=1)
+
+        fig_fwd.update_layout(
+            height=460,
+            margin=dict(l=12, r=120, t=28, b=12),
+            plot_bgcolor=BB_BG, paper_bgcolor=BB_PAPER,
+            font=dict(family="'Courier New', monospace", color=BB_TEXT, size=9),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
+                        font=dict(size=9, color=BB_TEXT), bgcolor="rgba(0,0,0,0)"),
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="#1e1e1e", font_color=BB_TEXT, font_size=10),
+        )
+        fig_fwd.update_xaxes(showgrid=True, gridcolor=BB_GRID,
+                              tickfont=dict(size=9, color=BB_TEXT,
+                                            family="'Courier New', monospace"),
+                              tickformat="%b '%y")
+        # Subplot title styling
+        for ann in fig_fwd.layout.annotations:
+            ann.update(font=dict(size=9, color=BB_SUBTEXT,
+                                 family="'Courier New', monospace"), x=0, xanchor="left")
+
+        st.plotly_chart(fig_fwd, width='stretch')
 
     st.caption(
-        "5y5y = 2×10y − 5y par yield approximation. Measures market expectation of the average "
-        "rate 5-10 years from now. Above 2.5% = inflation expectations unanchored — the Fed cannot "
-        "cut without reigniting long-run expectations. The move cited in TIPS desk notes (e.g. "
-        "5y5y falling on Middle East de-escalation) appears here in real time.")
+        "Nominal 5y5y = 2×DGS10 − DGS5 · where Treasury yields are expected 5-10 years out. "
+        "Real 5y5y = 2×DFII10 − DFII5 · real growth/r-star expectations. "
+        "Inflation 5y5y = nominal minus real · implied long-run inflation, the Fed's preferred gauge. "
+        "Above 2.5% = unanchored. The TIPS desk note move (de-escalation → 5y5y falls) appears on the bottom panel."
+    )
 
 st.markdown("")
 
