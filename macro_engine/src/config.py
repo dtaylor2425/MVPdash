@@ -17,6 +17,7 @@ FRED_SERIES = {
     # Rates
     "y3m":          "DGS3MO",        # 3m Treasury
     "y2":           "DGS2",          # 2y Treasury
+    "y5":           "DGS5",          # 5y Treasury  — needed for 5y5y forward
     "y10":          "DGS10",         # 10y Treasury
     # Credit
     "hy_oas":       "BAMLH0A0HYM2",  # High yield OAS
