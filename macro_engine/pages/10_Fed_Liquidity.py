@@ -625,179 +625,154 @@ with bs_col_w:
 st.markdown("")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROW 4 — 5y5y FORWARD (full width, dedicated chart)
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ROW 4 — 5y5y FORWARD: dual panel (nominal top, real + inflation bottom)
+# ROW 4 — 5y5y FORWARD: three clean panels, each on its own axis
 # ══════════════════════════════════════════════════════════════════════════════
 
 with st.container(border=True):
-    st.markdown("<div class='me-rowtitle'>5y5y forward rates — nominal · real · implied inflation</div>",
-                unsafe_allow_html=True)
+    st.markdown(
+        "<div class='me-rowtitle'>5y5y forward rates — nominal · real · implied inflation</div>",
+        unsafe_allow_html=True)
 
-    # ── KPI strip ──────────────────────────────────────────────────────────────
+    # ── KPI strip ─────────────────────────────────────────────────────────────
     _inf_c = ("#e84040" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
               ("#4aba6e" if (fwd5y5y_now and fwd5y5y_now < 2.0) else BB_ORANGE))
     _inf_lbl = ("UNANCHORED" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
                 ("ANCHORED"  if (fwd5y5y_now and fwd5y5y_now < 2.0) else "IN RANGE"))
 
     k1, k2, k3, k4, k5 = st.columns(5, gap="small")
-    _kpis = [
-        (k1, "INFL 5Y5Y",  fwd5y5y_now,      _inf_lbl,        _inf_c),
-        (k2, "NOM 5Y5Y",   fwd5y5y_nom_now,   "nominal fwd",   BB_ORANGE),
-        (k3, "REAL 5Y5Y",  fwd5y5y_real_now,  "real fwd (r*)", BB_BLUE),
-        (k4, "1W CHANGE",  fwd5y5y_1w,        "infl fwd Δ",   "#e84040" if (fwd5y5y_1w and fwd5y5y_1w>0) else "#4aba6e"),
-        (k5, "10Y BE",     be_now,             "near-term exp", BB_SUBTEXT),
-    ]
-    for col, label, val, sub, vc in _kpis:
-        v_str = f"{val:.3f}%" if val is not None else "—"
-        if label in ("1W CHANGE",) and val is not None:
-            v_str = f"{val:+.3f}pp"
-        col.markdown(
+    for _col, _lbl, _val, _sub, _vc in [
+        (k1, "INFL 5Y5Y",  fwd5y5y_now,       _inf_lbl,        _inf_c),
+        (k2, "NOM 5Y5Y",   fwd5y5y_nom_now,    "nominal fwd",   BB_ORANGE),
+        (k3, "REAL 5Y5Y",  fwd5y5y_real_now,   "real / r*",     BB_BLUE),
+        (k4, "1W INFL Δ",  fwd5y5y_1w,         "infl fwd",
+             "#e84040" if (fwd5y5y_1w and fwd5y5y_1w > 0) else "#4aba6e"),
+        (k5, "10Y BE",     be_now,              "near-term exp", BB_SUBTEXT),
+    ]:
+        _v = (f"{_val:+.3f}pp" if "Δ" in _lbl and _val is not None
+              else f"{_val:.3f}%" if _val is not None else "—")
+        _col.markdown(
             f"<div style='padding:10px 12px;border-radius:8px;"
             f"background:#111111;border:1px solid #1e1e1e;'>"
             f"<div style='font-size:9px;font-weight:700;color:{BB_SUBTEXT};"
-            f"font-family:Courier New,monospace;letter-spacing:0.8px;"
-            f"margin-bottom:4px;'>{label}</div>"
-            f"<div style='font-size:18px;font-weight:900;color:{vc};"
-            f"font-family:Courier New,monospace;'>{v_str}</div>"
+            f"font-family:Courier New,monospace;letter-spacing:0.8px;margin-bottom:4px;'>{_lbl}</div>"
+            f"<div style='font-size:18px;font-weight:900;color:{_vc};"
+            f"font-family:Courier New,monospace;'>{_v}</div>"
             f"<div style='font-size:9px;color:{BB_SUBTEXT};"
-            f"font-family:Courier New,monospace;margin-top:2px;'>{sub}</div>"
+            f"font-family:Courier New,monospace;margin-top:2px;'>{_sub}</div>"
             f"</div>", unsafe_allow_html=True)
 
     st.markdown("")
-
     fwd_range = st.selectbox("Range", RKEYS,
                               index=RKEYS.index("2y") if "2y" in RKEYS else RKEYS.index("1y"),
                               key="fwd_range")
-
-    # ── Dual panel chart ───────────────────────────────────────────────────────
-    # Top panel: Nominal 5y5y  (range ~3.5–5.5%)
-    # Bottom panel: Real 5y5y + Implied inflation 5y5y  (range ~1.5–3.0%)
-    # Separate axes so neither series gets squashed
 
     has_nom  = not fwd_5y5y_nom.empty
     has_real = not fwd_5y5y_real.empty
     has_inf  = not fwd_5y5y_inf.empty
 
-    if has_nom or has_inf:
-        fig_fwd = make_subplots(
-            rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.48, 0.52], vertical_spacing=0.06,
-            subplot_titles=["NOMINAL 5Y5Y FORWARD", "REAL 5Y5Y  &  IMPLIED INFLATION FORWARD"])
-
-        # ── TOP: Nominal 5y5y ────────────────────────────────────────────────
-        if has_nom:
-            nom_sl = slice_series(fwd_5y5y_nom, fwd_range)
-            if not nom_sl.empty:
-                fig_fwd.add_trace(go.Scatter(
-                    x=nom_sl.index, y=nom_sl.values,
-                    mode="lines", name="NOM 5Y5Y",
-                    line=dict(color=BB_ORANGE, width=2.0),
-                    fill="tozeroy", fillcolor="rgba(247,148,0,0.07)"),
-                    row=1, col=1)
-                lo_n = float(nom_sl.min()); hi_n = float(nom_sl.max())
-                pad_n = max((hi_n - lo_n) * 0.20, 0.10)
-                if fwd5y5y_nom_now:
-                    fig_fwd.add_hline(y=fwd5y5y_nom_now,
-                                      line_color=BB_YELLOW, line_width=1.2, line_dash="dot",
-                                      annotation_text=f"  NOW: {fwd5y5y_nom_now:.3f}%",
-                                      annotation_font_color=BB_YELLOW, annotation_font_size=9,
-                                      annotation_font_family="'Courier New', monospace",
-                                      annotation_position="right", row=1, col=1)
-                fig_fwd.update_yaxes(range=[lo_n-pad_n, hi_n+pad_n],
-                                     title_text="NOM %",
-                                     title_font=dict(size=9, color=BB_SUBTEXT),
-                                     tickfont=dict(size=9, color=BB_TEXT,
-                                                   family="'Courier New', monospace"),
-                                     showgrid=True, gridcolor=BB_GRID,
-                                     side="right", row=1, col=1)
-
-        # ── BOTTOM: Real 5y5y + Implied inflation ────────────────────────────
-        if has_real:
-            real_sl = slice_series(fwd_5y5y_real, fwd_range)
-            if not real_sl.empty:
-                fig_fwd.add_trace(go.Scatter(
-                    x=real_sl.index, y=real_sl.values,
-                    mode="lines", name="REAL 5Y5Y",
-                    line=dict(color=BB_BLUE, width=1.8)),
-                    row=2, col=1)
-
-        if has_inf:
-            inf_sl = slice_series(fwd_5y5y_inf, fwd_range)
-            if not inf_sl.empty:
-                fig_fwd.add_trace(go.Scatter(
-                    x=inf_sl.index, y=inf_sl.values,
-                    mode="lines", name="INFL 5Y5Y",
-                    line=dict(color=BB_ORANGE, width=2.0)),
-                    row=2, col=1)
-
-                # Threshold bands on bottom panel
-                fig_fwd.add_hrect(y0=2.5, y1=5.0,
-                                  fillcolor="rgba(232,64,64,0.06)", line_width=0,
-                                  row=2, col=1)
-                fig_fwd.add_hrect(y0=0.0, y1=2.0,
-                                  fillcolor="rgba(74,186,110,0.06)", line_width=0,
-                                  row=2, col=1)
-                # Threshold lines
-                for lvl, lbl, lc in [(2.5,"2.5% UNANCHORED",BB_RED),(2.0,"2.0% TARGET",BB_GREEN)]:
-                    fig_fwd.add_hline(y=lvl, line_color=lc, line_width=0.8, line_dash="dash",
-                                      annotation_text=f"  {lbl}",
-                                      annotation_font_color=BB_SUBTEXT, annotation_font_size=8,
-                                      annotation_font_family="'Courier New', monospace",
-                                      annotation_position="right", row=2, col=1)
-                if fwd5y5y_now:
-                    fig_fwd.add_hline(y=fwd5y5y_now,
-                                      line_color=BB_YELLOW, line_width=1.2, line_dash="dot",
-                                      annotation_text=f"  INFL NOW: {fwd5y5y_now:.3f}%",
-                                      annotation_font_color=BB_YELLOW, annotation_font_size=9,
-                                      annotation_font_family="'Courier New', monospace",
-                                      annotation_position="right", row=2, col=1)
-
-                # Dynamic y for bottom panel — fit real and inflation together
-                bot_vals = []
-                if has_real:
-                    r2 = slice_series(fwd_5y5y_real, fwd_range)
-                    if not r2.empty: bot_vals += list(r2.values)
-                bot_vals += list(inf_sl.values)
-                if bot_vals:
-                    lo_b = min(bot_vals); hi_b = max(bot_vals)
-                    pad_b = max((hi_b - lo_b) * 0.20, 0.10)
-                    fig_fwd.update_yaxes(range=[lo_b-pad_b, hi_b+pad_b],
-                                         title_text="RATE %",
-                                         title_font=dict(size=9, color=BB_SUBTEXT),
-                                         tickfont=dict(size=9, color=BB_TEXT,
-                                                       family="'Courier New', monospace"),
-                                         showgrid=True, gridcolor=BB_GRID,
-                                         side="right", row=2, col=1)
-
-        fig_fwd.update_layout(
-            height=460,
-            margin=dict(l=12, r=120, t=28, b=12),
+    # ── Helper: single-series Bloomberg panel ────────────────────────────────
+    def _bb_panel(series, color, name, now_val, thresholds=None, fill=True):
+        """Return a clean single-series Bloomberg-style figure. No annotation clutter."""
+        sl = slice_series(series, fwd_range)
+        if sl.empty:
+            return None
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=sl.index, y=sl.values,
+            mode="lines", name=name,
+            line=dict(color=color, width=2.2),
+            fill="tozeroy" if fill else "none",
+            fillcolor=f"rgba({int(color[1:3],16)},"
+                      f"{int(color[3:5],16)},"
+                      f"{int(color[5:7],16)},0.08)" if fill else None,
+        ))
+        lo = float(sl.min()); hi = float(sl.max())
+        pad = max((hi - lo) * 0.25, 0.08)
+        # Threshold reference lines — simple, no overlapping annotations
+        if thresholds:
+            for lvl, lbl, lc in thresholds:
+                if lo - pad <= lvl <= hi + pad:
+                    fig.add_hline(y=lvl, line_color=lc, line_width=0.7, line_dash="dash")
+                    # Put label as a shape annotation positioned at chart edge
+                    fig.add_annotation(x=sl.index[-1], y=lvl,
+                                       text=f" {lbl}", xanchor="left",
+                                       font=dict(size=8, color=lc,
+                                                 family="'Courier New', monospace"),
+                                       showarrow=False, xref="x", yref="y",
+                                       bgcolor=BB_BG, borderpad=2)
+        # Single "now" marker on the last point — cleaner than a hline annotation
+        if now_val is not None:
+            fig.add_trace(go.Scatter(
+                x=[sl.index[-1]], y=[now_val],
+                mode="markers+text",
+                marker=dict(color=BB_YELLOW, size=6, symbol="circle"),
+                text=[f" {now_val:.3f}%"],
+                textposition="middle right",
+                textfont=dict(size=9, color=BB_YELLOW,
+                              family="'Courier New', monospace"),
+                showlegend=False,
+            ))
+        fig.update_layout(
+            height=190,
+            margin=dict(l=10, r=70, t=6, b=6),
             plot_bgcolor=BB_BG, paper_bgcolor=BB_PAPER,
-            font=dict(family="'Courier New', monospace", color=BB_TEXT, size=9),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
-                        font=dict(size=9, color=BB_TEXT), bgcolor="rgba(0,0,0,0)"),
-            hovermode="x unified",
+            showlegend=False, hovermode="x unified",
             hoverlabel=dict(bgcolor="#1e1e1e", font_color=BB_TEXT, font_size=10),
+            font=dict(family="'Courier New', monospace", color=BB_TEXT, size=9),
         )
-        fig_fwd.update_xaxes(showgrid=True, gridcolor=BB_GRID,
-                              tickfont=dict(size=9, color=BB_TEXT,
-                                            family="'Courier New', monospace"),
-                              tickformat="%b '%y")
-        # Subplot title styling
-        for ann in fig_fwd.layout.annotations:
-            ann.update(font=dict(size=9, color=BB_SUBTEXT,
-                                 family="'Courier New', monospace"), x=0, xanchor="left")
+        fig.update_xaxes(showgrid=True, gridcolor=BB_GRID, gridwidth=1, zeroline=False,
+                         tickfont=dict(size=8, color=BB_TEXT,
+                                       family="'Courier New', monospace"),
+                         tickformat="%b '%y", showline=False)
+        fig.update_yaxes(showgrid=True, gridcolor=BB_GRID, zeroline=False,
+                         tickfont=dict(size=8, color=BB_TEXT,
+                                       family="'Courier New', monospace"),
+                         range=[lo - pad, hi + pad], side="right")
+        return fig
 
-        st.plotly_chart(fig_fwd, width='stretch')
+    # ── Panel labels ─────────────────────────────────────────────────────────
+    def _panel_label(text, color):
+        st.markdown(
+            f"<div style='font-size:9px;font-weight:700;color:{color};"
+            f"font-family:Courier New,monospace;letter-spacing:1px;"
+            f"padding:4px 0 2px 2px;'>{text}</div>",
+            unsafe_allow_html=True)
+
+    # ── Chart 1: Nominal 5y5y ────────────────────────────────────────────────
+    if has_nom:
+        _panel_label("NOMINAL 5Y5Y FORWARD  —  where 10y Treasury yields expected 5-10y from now",
+                     BB_SUBTEXT)
+        fig_nom = _bb_panel(fwd_5y5y_nom, BB_ORANGE, "NOM 5Y5Y", fwd5y5y_nom_now)
+        if fig_nom:
+            st.plotly_chart(fig_nom, width='stretch')
+
+    # ── Chart 2: Implied inflation 5y5y ──────────────────────────────────────
+    if has_inf:
+        _panel_label("IMPLIED INFLATION 5Y5Y  —  nominal minus real · the Fed's preferred long-run gauge",
+                     BB_SUBTEXT)
+        fig_inf2 = _bb_panel(
+            fwd_5y5y_inf, BB_ORANGE, "INFL 5Y5Y", fwd5y5y_now,
+            thresholds=[(2.5, "2.5% UNANCHORED", BB_RED),
+                        (2.0, "2.0% TARGET",     BB_GREEN)],
+            fill=True)
+        if fig_inf2:
+            st.plotly_chart(fig_inf2, width='stretch')
+
+    # ── Chart 3: Real 5y5y ───────────────────────────────────────────────────
+    if has_real:
+        _panel_label("REAL 5Y5Y FORWARD  —  r* expectations · real borrowing cost 5-10y out",
+                     BB_SUBTEXT)
+        fig_real = _bb_panel(fwd_5y5y_real, BB_BLUE, "REAL 5Y5Y", fwd5y5y_real_now,
+                             fill=True)
+        if fig_real:
+            st.plotly_chart(fig_real, width='stretch')
 
     st.caption(
-        "Nominal 5y5y = 2×DGS10 − DGS5 · where Treasury yields are expected 5-10 years out. "
-        "Real 5y5y = 2×DFII10 − DFII5 · real growth/r-star expectations. "
-        "Inflation 5y5y = nominal minus real · implied long-run inflation, the Fed's preferred gauge. "
-        "Above 2.5% = unanchored. The TIPS desk note move (de-escalation → 5y5y falls) appears on the bottom panel."
+        "Nominal 5y5y = 2×DGS10 − DGS5 · "
+        "Real 5y5y = 2×DFII10 − DFII5 · "
+        "Inflation 5y5y = nominal minus real. "
+        "Inflation 5y5y above 2.5% = long-run expectations unanchored — "
+        "the Fed cannot ease without reigniting inflation."
     )
 
 st.markdown("")
