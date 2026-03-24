@@ -46,6 +46,7 @@ fed_assets = _col("fed_assets")
 real10     = _col("real10")
 dollar     = _col("dollar_broad")
 y10        = _col("y10")
+y5         = _col("y5")
 y2         = _col("y2")
 ff         = _col("fed_funds")
 cpi_raw    = _col("cpi")
@@ -54,6 +55,14 @@ hy_oas     = _col("hy_oas")
 cpi_yoy   = (cpi_raw.pct_change(12) * 100).dropna() if len(cpi_raw) >= 13 else None
 breakeven = (y10 - real10).dropna() if len(y10) > 10 and len(real10) > 10 \
             else pd.Series(dtype=float)
+
+# 5y5y forward rate (par yield approximation: 2×10y − 5y)
+# The Fed's preferred long-run inflation gauge. Above 2.5% = unanchored.
+fwd_5y5y = pd.Series(dtype=float)
+if len(y10) > 10 and len(y5) > 10:
+    _idx = y10.index.intersection(y5.index)
+    if len(_idx) > 10:
+        fwd_5y5y = (2 * y10.loc[_idx] - y5.loc[_idx]).dropna()
 fed_roc13 = fed_assets.pct_change(63).dropna() * 100  if len(fed_assets) >= 70  else None
 fed_roc26 = fed_assets.pct_change(126).dropna() * 100 if len(fed_assets) >= 130 else None
 fed_z     = None
@@ -107,6 +116,9 @@ cpi_3m        = _delta(cpi_yoy, 91) if cpi_yoy is not None else None
 ff_now        = _last(ff)
 be_now        = _last(breakeven)
 be_3m         = _delta(breakeven, 91)
+fwd5y5y_now   = _last(fwd_5y5y)      if not fwd_5y5y.empty else None
+fwd5y5y_1w    = _delta(fwd_5y5y, 7)  if not fwd_5y5y.empty else None
+fwd5y5y_1m    = _delta(fwd_5y5y, 30) if not fwd_5y5y.empty else None
 
 # ── Policy stance ─────────────────────────────────────────────────────────────
 
@@ -159,7 +171,22 @@ def fmt_s(x, nd=2, suffix=""):
     if x is None or (isinstance(x, float) and np.isnan(x)): return "—"
     return f"{float(x):+.{nd}f}{suffix}"
 
+# ── Bloomberg-style chart colours ────────────────────────────────────────────
+BB_BG       = "#0d0d0d"   # near-black background
+BB_PAPER    = "#0d0d0d"
+BB_GRID     = "#1e1e1e"   # very subtle gridlines
+BB_GRID2    = "#2a2a2a"   # slightly more visible
+BB_TEXT     = "#c8c8c8"   # axis labels
+BB_SUBTEXT  = "#666666"
+BB_ORANGE   = "#f79400"   # Bloomberg amber — primary line colour
+BB_GREEN    = "#4aba6e"   # green series
+BB_RED      = "#e84040"   # red series
+BB_PURPLE   = "#a78bfa"   # purple series (5y5y)
+BB_YELLOW   = "#ffd700"   # highlight / now line
+BB_BLUE     = "#4a8fe8"   # secondary blue
+
 def _fig_base(height=260):
+    """Light theme — used for simple supporting charts."""
     fig = go.Figure()
     fig.update_layout(height=height, margin=dict(l=10, r=20, t=20, b=20),
                       plot_bgcolor="white", paper_bgcolor="white",
@@ -168,6 +195,61 @@ def _fig_base(height=260):
     fig.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
     fig.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
     return fig
+
+def _fig_bb(height=280, title=""):
+    """Bloomberg dark theme — for primary charts."""
+    fig = go.Figure()
+    fig.update_layout(
+        height=height,
+        margin=dict(l=12, r=48, t=32, b=12),
+        plot_bgcolor=BB_BG,
+        paper_bgcolor=BB_PAPER,
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="#1e1e1e", font_color=BB_TEXT, font_size=11,
+                        bordercolor="#333333"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.03, x=0,
+                    font=dict(size=10, color=BB_TEXT),
+                    bgcolor="rgba(0,0,0,0)"),
+        font=dict(family="'Courier New', monospace", color=BB_TEXT, size=10),
+        title=dict(text=title, font=dict(size=11, color=BB_TEXT), x=0, xanchor="left",
+                   y=0.98) if title else dict(text=""),
+        xaxis=dict(
+            showgrid=True, gridcolor=BB_GRID, gridwidth=1,
+            zeroline=False, showline=True, linecolor=BB_GRID2,
+            tickfont=dict(size=9, color=BB_TEXT, family="'Courier New', monospace"),
+            tickformat="%b '%y",
+        ),
+        yaxis=dict(
+            showgrid=True, gridcolor=BB_GRID, gridwidth=1,
+            zeroline=False, showline=False,
+            tickfont=dict(size=9, color=BB_TEXT, family="'Courier New', monospace"),
+            side="right",
+        ),
+    )
+    return fig
+
+def _bb_now_line(fig, val, label, color=None):
+    """Dotted 'NOW' annotation line — Bloomberg style."""
+    if val is None: return
+    c = color or BB_YELLOW
+    fig.add_hline(
+        y=val, line_color=c, line_width=1.2, line_dash="dot",
+        annotation_text=f"  {label}: {val:.2f}",
+        annotation_position="right",
+        annotation_font_color=c, annotation_font_size=9,
+        annotation_font_family="'Courier New', monospace",
+    )
+
+def _bb_threshold(fig, val, label, color=BB_GRID2):
+    """Subtle threshold reference line."""
+    if val is None: return
+    fig.add_hline(
+        y=val, line_color=color, line_width=0.8, line_dash="dash",
+        annotation_text=f"  {label}",
+        annotation_position="right",
+        annotation_font_color=BB_SUBTEXT, annotation_font_size=8,
+        annotation_font_family="'Courier New', monospace",
+    )
 
 def _dyn_y(series_list, pad=0.12):
     vals = []
@@ -318,6 +400,12 @@ with p3:
               ("#dcfce7" if dl_signal == "Weakening" else "#f3f4f6")
     dl_pctrank = _pct_rank(dollar)
 
+    # 5y5y colour + signal
+    _fwd_c   = ("#b42318" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
+                ("#1f7a4f" if (fwd5y5y_now and fwd5y5y_now < 2.0) else "#6b7280"))
+    _fwd_sig = ("Unanchored ↑" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
+                ("Anchored ↓"  if (fwd5y5y_now and fwd5y5y_now < 2.0) else "In range"))
+
     dl_rows = (
         _signal_row("Broad dollar index", fmt(dollar_now, nd=1),
                     "Broad trade-weighted USD",
@@ -332,7 +420,12 @@ with p3:
                     "Realised inflation",
                     fmt_s(cpi_3m, suffix="pp 3m") if cpi_3m is not None else "—",
                     "#b42318" if (cpi_3m and cpi_3m > 0.2) else
-                    ("#1f7a4f" if (cpi_3m and cpi_3m < -0.2) else "#6b7280"))
+                    ("#1f7a4f" if (cpi_3m and cpi_3m < -0.2) else "#6b7280")) +
+        (_signal_row("5y5y forward",
+                     fmt(fwd5y5y_now, nd=2, suffix="%"),
+                     "Long-run inflation exp · Fed preferred gauge",
+                     fmt_s(fwd5y5y_1w, nd=2, suffix="pp 1w") if fwd5y5y_1w else _fwd_sig,
+                     _fwd_c) if fwd5y5y_now is not None else "")
     )
     dl_gauge = _gauge_bar(dl_pctrank, dl_col) if dl_pctrank is not None else ""
 
@@ -360,6 +453,20 @@ st.markdown("")
 
 # Compute cross-pillar tensions
 tensions = []
+if fwd5y5y_now and fwd5y5y_now > 2.5:
+    tensions.append(("📊 Long-run inflation expectations elevated", "#d97706",
+                     f"5y5y forward at {fwd5y5y_now:.2f}% — above the threshold where "
+                     "the Fed historically becomes concerned. Elevated 5y5y constrains "
+                     "the Fed's ability to cut even if near-term CPI falls."))
+if fwd5y5y_now and fwd5y5y_1w and abs(fwd5y5y_1w) > 0.05:
+    _fwd_dir = "rising" if fwd5y5y_1w > 0 else "falling"
+    _fwd_txt = ("Rapid moves higher in 5y5y precede Fed hawkish surprises."
+                if fwd5y5y_1w > 0 else
+                "Falling 5y5y signals de-anchoring of inflation fears — bullish for duration.")
+    tensions.append((f"{'⚠️' if fwd5y5y_1w > 0 else '📉'} 5y5y moving fast",
+                     "#d97706" if fwd5y5y_1w > 0 else "#1f7a4f",
+                     f"5y5y forward {_fwd_dir} {abs(fwd5y5y_1w):.2f}pp this week to "
+                     f"{fwd5y5y_now:.2f}%. {_fwd_txt}"))
 if real_now and real_now > 1.5 and (fed_roc13_now is None or fed_roc13_now < 0):
     tensions.append(("⚠️ Maximum tightening", "#b42318",
                      f"Real yields {real_now:.2f}% + balance sheet contracting — "
@@ -399,7 +506,7 @@ for icon_lbl, t_color, t_text in tensions:
 st.markdown("")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROW 3 — REAL RATE PATH  |  BALANCE SHEET + IMPULSE  (side by side, 1y default)
+# ROW 3 — REAL RATE PATH  |  BALANCE SHEET + IMPULSE
 # ══════════════════════════════════════════════════════════════════════════════
 
 rr_col, bs_col_w = st.columns(2, gap="large")
@@ -412,30 +519,25 @@ with rr_col:
         rr_range = st.selectbox("Range", RKEYS, index=RKEYS.index("1y"), key="rr_range")
         rr_sl    = slice_series(real10, rr_range)
         if not rr_sl.empty:
-            fig_rr = _fig_base(260)
-            for y0, y1, bg in [(-5, 0, "rgba(31,122,79,0.07)"),
-                                (0, 0.5, "rgba(107,114,128,0.04)"),
-                                (0.5, 1.5, "rgba(217,119,6,0.05)"),
-                                (1.5, 6, "rgba(180,35,24,0.07)")]:
-                fig_rr.add_hrect(y0=y0, y1=y1, fillcolor=bg, line_width=0)
+            fig_rr = _fig_bb(280)
+            # Bloomberg-style regime bands — subtle on dark bg
+            for y0, y1, fc in [(-5, 0,   "rgba(74,186,110,0.10)"),
+                                (0,  0.5, "rgba(200,200,200,0.03)"),
+                                (0.5,1.5, "rgba(247,148,0,0.08)"),
+                                (1.5, 6,  "rgba(232,64,64,0.10)")]:
+                fig_rr.add_hrect(y0=y0, y1=y1, fillcolor=fc, line_width=0)
             lo_r = float(rr_sl.min()); hi_r = float(rr_sl.max())
             pad_r = max((hi_r - lo_r) * 0.15, 0.05)
-            for lvl, lbl in [(0,"Zero"), (0.5,"Neutral"), (1.5,"Restrictive")]:
+            for lvl, lbl in [(0,"ZERO"), (0.5,"NEUTRAL"), (1.5,"RESTRICTIVE")]:
                 if lo_r - pad_r <= lvl <= hi_r + pad_r:
-                    fig_rr.add_hline(y=lvl, line_dash="dash", line_color="#cbd5e1",
-                                     line_width=1, annotation_text=lbl,
-                                     annotation_position="right", annotation_font_size=9)
-            fig_rr.add_trace(go.Scatter(x=rr_sl.index, y=rr_sl.values,
-                                         mode="lines", name="10y real",
-                                         line=dict(color="#dc2626", width=2.2),
-                                         fill="tozeroy",
-                                         fillcolor="rgba(220,38,38,0.06)"))
-            if real_now is not None:
-                rc = "#b42318" if real_now > 1.5 else ("#d97706" if real_now > 0.5 else "#1f7a4f")
-                fig_rr.add_hline(y=real_now, line_color=rc, line_width=1.5,
-                                 annotation_text=f"Now: {real_now:.2f}%",
-                                 annotation_position="right", annotation_font_color=rc)
-            fig_rr.update_yaxes(range=[lo_r-pad_r, hi_r+pad_r], title_text="Real yield (%)")
+                    _bb_threshold(fig_rr, lvl, lbl, BB_GRID2)
+            fig_rr.add_trace(go.Scatter(
+                x=rr_sl.index, y=rr_sl.values, mode="lines", name="10Y REAL",
+                line=dict(color=BB_ORANGE, width=2.0),
+                fill="tozeroy", fillcolor="rgba(247,148,0,0.08)"))
+            _bb_now_line(fig_rr, real_now, "NOW", BB_YELLOW)
+            fig_rr.update_yaxes(range=[lo_r-pad_r, hi_r+pad_r],
+                                 title_text="REAL YIELD %", title_font=dict(size=9, color=BB_SUBTEXT))
             st.plotly_chart(fig_rr, width='stretch')
         else:
             st.caption("Real yield data unavailable.")
@@ -451,35 +553,47 @@ with bs_col_w:
         if not fa_sl.empty and fed_roc13 is not None:
             roc_sl = slice_series(fed_roc13, bs_range)
             fig_bs = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                   row_heights=[0.58, 0.42], vertical_spacing=0.05)
+                                   row_heights=[0.58, 0.42], vertical_spacing=0.04)
             fa_t = fa_sl / 1e6
-            fig_bs.add_trace(go.Scatter(x=fa_t.index, y=fa_t.values,
-                                        mode="lines", name="Fed assets ($T)",
-                                        line=dict(color="#1d4ed8", width=2),
-                                        fill="tozeroy",
-                                        fillcolor="rgba(29,78,216,0.06)"),
-                             row=1, col=1)
+            fig_bs.add_trace(go.Scatter(
+                x=fa_t.index, y=fa_t.values, mode="lines", name="FED ASSETS $T",
+                line=dict(color=BB_BLUE, width=2),
+                fill="tozeroy", fillcolor="rgba(74,143,232,0.08)"),
+                row=1, col=1)
             fa_lo = float(fa_t.min()) * 0.97; fa_hi = float(fa_t.max()) * 1.02
-            fig_bs.update_yaxes(range=[fa_lo, fa_hi], title_text="$T", row=1, col=1)
-
+            fig_bs.update_yaxes(range=[fa_lo, fa_hi], title_text="$T",
+                                 title_font=dict(size=9, color=BB_SUBTEXT),
+                                 tickfont=dict(size=9, color=BB_TEXT,
+                                               family="'Courier New', monospace"),
+                                 showgrid=True, gridcolor=BB_GRID, row=1, col=1)
             if not roc_sl.empty:
-                bar_colors = ["#1f7a4f" if v >= 0 else "#b42318" for v in roc_sl.values]
-                fig_bs.add_trace(go.Bar(x=roc_sl.index, y=roc_sl.values,
-                                        marker_color=bar_colors, name="13w impulse %",
-                                        showlegend=True), row=2, col=1)
-                fig_bs.add_hline(y=0, line_color="#94a3b8", line_width=1, row=2, col=1)
+                bar_colors = [BB_GREEN if v >= 0 else BB_RED for v in roc_sl.values]
+                fig_bs.add_trace(go.Bar(
+                    x=roc_sl.index, y=roc_sl.values,
+                    marker_color=bar_colors, name="13W IMPULSE %",
+                    showlegend=True), row=2, col=1)
+                fig_bs.add_hline(y=0, line_color=BB_GRID2, line_width=1, row=2, col=1)
                 rv = roc_sl.values
                 rlo = min(rv); rhi = max(rv)
                 rpad = max(abs(rlo), abs(rhi)) * 0.15
-                fig_bs.update_yaxes(range=[rlo-rpad, rhi+rpad], title_text="13w Δ%",
-                                    row=2, col=1)
-
-            fig_bs.update_layout(height=260, margin=dict(l=10, r=20, t=10, b=10),
-                                 plot_bgcolor="white", paper_bgcolor="white",
-                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                                 hovermode="x unified", barmode="relative")
-            fig_bs.update_xaxes(showgrid=True, gridcolor="#f1f5f9")
-            fig_bs.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
+                fig_bs.update_yaxes(range=[rlo-rpad, rhi+rpad], title_text="13W Δ%",
+                                     title_font=dict(size=9, color=BB_SUBTEXT),
+                                     tickfont=dict(size=9, color=BB_TEXT,
+                                                   family="'Courier New', monospace"),
+                                     showgrid=True, gridcolor=BB_GRID, row=2, col=1)
+            fig_bs.update_layout(
+                height=280, margin=dict(l=12, r=48, t=12, b=12),
+                plot_bgcolor=BB_BG, paper_bgcolor=BB_PAPER,
+                font=dict(family="'Courier New', monospace", color=BB_TEXT, size=9),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
+                            font=dict(size=9, color=BB_TEXT), bgcolor="rgba(0,0,0,0)"),
+                hovermode="x unified",
+                hoverlabel=dict(bgcolor="#1e1e1e", font_color=BB_TEXT, font_size=10),
+                barmode="relative")
+            fig_bs.update_xaxes(showgrid=True, gridcolor=BB_GRID,
+                                 tickfont=dict(size=9, color=BB_TEXT,
+                                               family="'Courier New', monospace"),
+                                 tickformat="%b '%y")
             st.plotly_chart(fig_bs, width='stretch')
         else:
             st.caption("Fed balance sheet data unavailable.")
@@ -487,7 +601,92 @@ with bs_col_w:
 st.markdown("")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROW 4 — CPI + BREAKEVEN  |  DOLLAR CYCLE + LIQUIDITY PROXY
+# ROW 4 — 5y5y FORWARD (full width, dedicated chart)
+# ══════════════════════════════════════════════════════════════════════════════
+
+with st.container(border=True):
+    st.markdown("<div class='me-rowtitle'>5y5y forward inflation rate — the Fed's long-run gauge</div>",
+                unsafe_allow_html=True)
+
+    _fwd_kpi_c = ("#e84040" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
+                  ("#4aba6e" if (fwd5y5y_now and fwd5y5y_now < 2.0) else "#f79400"))
+    _fwd_kpi_lbl = ("UNANCHORED" if (fwd5y5y_now and fwd5y5y_now > 2.5) else
+                    ("ANCHORED"  if (fwd5y5y_now and fwd5y5y_now < 2.0) else "IN RANGE"))
+
+    k1, k2, k3, k4 = st.columns(4, gap="small")
+    for col, label, val, sub in [
+        (k1, "5Y5Y NOW",    f"{fwd5y5y_now:.3f}%" if fwd5y5y_now else "—", _fwd_kpi_lbl),
+        (k2, "1W CHANGE",   f"{fwd5y5y_1w:+.3f}pp" if fwd5y5y_1w else "—", "week on week"),
+        (k3, "1M CHANGE",   f"{fwd5y5y_1m:+.3f}pp" if fwd5y5y_1m else "—", "month on month"),
+        (k4, "10Y BREAKEVEN", f"{be_now:.3f}%" if be_now else "—", "near-term exp"),
+    ]:
+        vc = _fwd_kpi_c if "NOW" in label else ("#e84040" if (val and "+" in str(val)) else
+             ("#4aba6e" if (val and "-" in str(val)) else BB_TEXT))
+        col.markdown(
+            f"<div style='padding:10px 12px;border-radius:8px;"
+            f"background:#111111;border:1px solid #1e1e1e;'>"
+            f"<div style='font-size:9px;font-weight:700;color:{BB_SUBTEXT};"
+            f"font-family:Courier New,monospace;letter-spacing:0.8px;"
+            f"margin-bottom:4px;'>{label}</div>"
+            f"<div style='font-size:20px;font-weight:900;color:{vc};"
+            f"font-family:Courier New,monospace;'>{val}</div>"
+            f"<div style='font-size:9px;color:{BB_SUBTEXT};"
+            f"font-family:Courier New,monospace;margin-top:2px;'>{sub}</div>"
+            f"</div>", unsafe_allow_html=True)
+
+    st.markdown("")
+    fwd_range = st.selectbox("Range", RKEYS, index=RKEYS.index("2y") if "2y" in RKEYS else RKEYS.index("1y"),
+                              key="fwd_range")
+    if not fwd_5y5y.empty:
+        fwd_sl_main = slice_series(fwd_5y5y, fwd_range)
+        be_sl_main  = slice_series(breakeven, fwd_range) if not breakeven.empty else None
+
+        if not fwd_sl_main.empty:
+            fig_fwd = _fig_bb(300)
+            # Threshold bands
+            fig_fwd.add_hrect(y0=2.5, y1=4.0, fillcolor="rgba(232,64,64,0.07)", line_width=0)
+            fig_fwd.add_hrect(y0=0.0, y1=2.0, fillcolor="rgba(74,186,110,0.07)", line_width=0)
+
+            # 5y5y line — main series in Bloomberg amber
+            fig_fwd.add_trace(go.Scatter(
+                x=fwd_sl_main.index, y=fwd_sl_main.values,
+                mode="lines", name="5Y5Y FWD",
+                line=dict(color=BB_ORANGE, width=2.2),
+                fill="tozeroy", fillcolor="rgba(247,148,0,0.07)"))
+
+            # 10y breakeven overlay
+            if be_sl_main is not None and not be_sl_main.empty:
+                fig_fwd.add_trace(go.Scatter(
+                    x=be_sl_main.index, y=be_sl_main.values,
+                    mode="lines", name="10Y BREAKEVEN",
+                    line=dict(color=BB_BLUE, width=1.4, dash="dot")))
+
+            # Threshold lines
+            _bb_threshold(fig_fwd, 2.5, "2.5% UNANCHORED ZONE", BB_RED)
+            _bb_threshold(fig_fwd, 2.0, "2.0% FED TARGET", BB_GREEN)
+            _bb_now_line(fig_fwd, fwd5y5y_now, "5Y5Y", BB_YELLOW)
+
+            # Dynamic y range
+            all_v = list(fwd_sl_main.values)
+            if be_sl_main is not None and not be_sl_main.empty:
+                all_v += list(be_sl_main.values)
+            lo_f = min(all_v); hi_f = max(all_v)
+            pad_f = max((hi_f - lo_f) * 0.18, 0.1)
+            fig_fwd.update_yaxes(range=[lo_f-pad_f, hi_f+pad_f],
+                                  title_text="RATE %",
+                                  title_font=dict(size=9, color=BB_SUBTEXT))
+            st.plotly_chart(fig_fwd, width='stretch')
+
+    st.caption(
+        "5y5y = 2×10y − 5y par yield approximation. Measures market expectation of the average "
+        "rate 5-10 years from now. Above 2.5% = inflation expectations unanchored — the Fed cannot "
+        "cut without reigniting long-run expectations. The move cited in TIPS desk notes (e.g. "
+        "5y5y falling on Middle East de-escalation) appears here in real time.")
+
+st.markdown("")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROW 5 — CPI + BREAKEVEN  |  DOLLAR CYCLE
 # ══════════════════════════════════════════════════════════════════════════════
 
 inf_col, liq_col = st.columns(2, gap="large")
@@ -499,31 +698,35 @@ with inf_col:
         st.caption("Breakeven above CPI = market expecting re-acceleration. "
                    "Gap narrowing = disinflation confirmed by market.")
         inf_range = st.selectbox("Range", RKEYS, index=RKEYS.index("1y"), key="inf_range")
-        fig_inf = _fig_base(240)
-        all_inf = []
-        plotted = False
+        fig_inf   = _fig_bb(260)
+        all_inf   = []; plotted = False
         if cpi_yoy is not None and not cpi_yoy.empty:
             ci_sl = slice_series(cpi_yoy, inf_range)
             if not ci_sl.empty:
                 fig_inf.add_trace(go.Scatter(x=ci_sl.index, y=ci_sl.values,
-                                             mode="lines", name="CPI YoY",
-                                             line=dict(color="#dc2626", width=2)))
+                    mode="lines", name="CPI YoY",
+                    line=dict(color=BB_RED, width=2)))
                 all_inf += list(ci_sl.values); plotted = True
         if not breakeven.empty:
             be_sl = slice_series(breakeven, inf_range)
             if not be_sl.empty:
                 fig_inf.add_trace(go.Scatter(x=be_sl.index, y=be_sl.values,
-                                             mode="lines", name="10y breakeven",
-                                             line=dict(color="#d97706", width=2, dash="dot")))
+                    mode="lines", name="10Y BREAKEVEN",
+                    line=dict(color=BB_ORANGE, width=2, dash="dot")))
                 all_inf += list(be_sl.values); plotted = True
+        if not fwd_5y5y.empty:
+            fwd_sl2 = slice_series(fwd_5y5y, inf_range)
+            if not fwd_sl2.empty:
+                fig_inf.add_trace(go.Scatter(x=fwd_sl2.index, y=fwd_sl2.values,
+                    mode="lines", name="5Y5Y FWD",
+                    line=dict(color=BB_PURPLE, width=1.6, dash="dashdot")))
+                all_inf += list(fwd_sl2.values); plotted = True
         if plotted and all_inf:
             lo_i = min(all_inf); hi_i = max(all_inf)
             pad_i = max((hi_i - lo_i) * 0.15, 0.1)
-            if lo_i - pad_i <= 2.0 <= hi_i + pad_i:
-                fig_inf.add_hline(y=2.0, line_dash="dash", line_color="#94a3b8",
-                                  line_width=1, annotation_text="2% target",
-                                  annotation_position="right", annotation_font_size=9)
-            fig_inf.update_yaxes(range=[lo_i-pad_i, hi_i+pad_i], title_text="% YoY")
+            _bb_threshold(fig_inf, 2.0, "2% TARGET")
+            fig_inf.update_yaxes(range=[lo_i-pad_i, hi_i+pad_i], title_text="% YoY",
+                                  title_font=dict(size=9, color=BB_SUBTEXT))
             st.plotly_chart(fig_inf, width='stretch')
         else:
             st.caption("Inflation data unavailable.")
@@ -532,38 +735,43 @@ with liq_col:
     with st.container(border=True):
         st.markdown("<div class='me-rowtitle'>Dollar cycle &amp; liquidity proxy</div>",
                     unsafe_allow_html=True)
-        st.caption("Dollar (left) + Fed z-score vs IWM/SPY breadth (right). "
-                   "All three rising = genuine risk-on. Divergences are the story.")
+        st.caption("Dollar (left) + IWM/SPY breadth (right). "
+                   "All rising = genuine risk-on. Divergences are the story.")
         lq_range = st.selectbox("Range", RKEYS, index=RKEYS.index("1y"), key="lq_range")
-
         dl_sl = slice_series(dollar, lq_range)
         if not dl_sl.empty:
-            fig_dl = _fig_base(240)
+            fig_dl = _fig_bb(260)
             ma63 = dl_sl.rolling(63, min_periods=10).mean()
             fig_dl.add_trace(go.Scatter(x=dl_sl.index, y=dl_sl.values,
-                                        mode="lines", name="Dollar broad",
-                                        line=dict(color="#1d4ed8", width=2)))
+                mode="lines", name="DOLLAR BROAD",
+                line=dict(color=BB_ORANGE, width=2)))
             if not ma63.dropna().empty:
                 fig_dl.add_trace(go.Scatter(x=ma63.index, y=ma63.values,
-                                            mode="lines", name="63d MA",
-                                            line=dict(color="#94a3b8", width=1.4, dash="dash")))
-            if iwm_spy is not None and fed_z is not None:
+                    mode="lines", name="63D MA",
+                    line=dict(color=BB_SUBTEXT, width=1.2, dash="dash")))
+            if iwm_spy is not None:
                 iw_sl = slice_series(iwm_spy, lq_range)
-                fz_sl = slice_series(fed_z, lq_range)
                 if not iw_sl.empty:
                     fig_dl.add_trace(go.Scatter(x=iw_sl.index, y=iw_sl.values,
-                                                mode="lines", name="IWM/SPY",
-                                                line=dict(color="#f97316", width=1.6, dash="dot"),
-                                                yaxis="y2"))
+                        mode="lines", name="IWM/SPY",
+                        line=dict(color=BB_GREEN, width=1.4, dash="dot"),
+                        yaxis="y2"))
             vals_dl = list(dl_sl.values)
             lo_d = min(vals_dl); hi_d = max(vals_dl)
             pad_d = max((hi_d-lo_d)*0.08, 0.5)
             fig_dl.update_layout(
-                yaxis=dict(range=[lo_d-pad_d, hi_d+pad_d], title="Dollar",
-                           showgrid=True, gridcolor="#f1f5f9"),
-                yaxis2=dict(overlaying="y", side="right", title="IWM/SPY",
-                            showgrid=False, showticklabels=True),
+                yaxis=dict(range=[lo_d-pad_d, hi_d+pad_d], title="DOLLAR",
+                           showgrid=True, gridcolor=BB_GRID,
+                           tickfont=dict(size=9, color=BB_TEXT,
+                                         family="'Courier New', monospace"),
+                           title_font=dict(size=9, color=BB_SUBTEXT)),
+                yaxis2=dict(overlaying="y", side="left", title="IWM/SPY",
+                            showgrid=False, showticklabels=True,
+                            tickfont=dict(size=9, color=BB_TEXT,
+                                          family="'Courier New', monospace"),
+                            title_font=dict(size=9, color=BB_SUBTEXT)),
             )
+            _bb_now_line(fig_dl, dollar_now, "NOW", BB_YELLOW)
             st.plotly_chart(fig_dl, width='stretch')
         else:
             st.caption("Dollar data unavailable.")
