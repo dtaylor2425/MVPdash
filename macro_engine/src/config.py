@@ -23,6 +23,7 @@ FRED_SERIES = {
     "hy_oas":       "BAMLH0A0HYM2",  # High yield OAS
     # Real yields / inflation
     "real10":       "DFII10",        # 10y TIPS real yield
+    "real5":        "DFII5",         # 5y TIPS real yield — needed for real 5y5y forward
     "cpi":          "CPIAUCSL",      # CPI all urban, NSA -- converted to YoY in page
     "fed_funds":    "FEDFUNDS",      # Effective fed funds rate
     # Liquidity / dollar
