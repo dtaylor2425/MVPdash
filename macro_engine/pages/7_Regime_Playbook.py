@@ -53,7 +53,7 @@ Sources used
 Regime engine (v4):  score, components, timeseries, momentum
 FRED:   hy_oas, real10, y10-y2, y3m, fed_assets, dollar_broad, cpi, fed_funds
 Prices: SPY, QQQ, IWM, XLE, XLF, XLK, XLI, XLV, XLP, GLD, UUP, HYG, TLT,
-        IBIT, XBI, IGV, SMH, RSP
+        BTC, XBI, IGV, SMH, RSP
 VIX proxies: ^VIX, ^VIX3M
 """
 
@@ -82,14 +82,14 @@ if not FRED_API_KEY:
 # ── Basket ────────────────────────────────────────────────────────────────────
 
 ASSETS = ["SPY","QQQ","IWM","XLE","XLF","XLK","XLI","XLV","XLP",
-          "XLU","XLC","GLD","UUP","HYG","TLT","IBIT","XBI","IGV","SMH","RSP"]
+          "XLU","XLC","GLD","UUP","HYG","TLT","BTC","XBI","IGV","SMH","RSP"]
 ASSET_LABELS = {
     "SPY":"S&P 500",  "QQQ":"Nasdaq",    "IWM":"Small caps",
     "XLE":"Energy",   "XLF":"Financials","XLK":"Technology",
     "XLI":"Industrials","XLV":"Healthcare","XLP":"Staples",
     "XLU":"Utilities","XLC":"Comms",
     "GLD":"Gold",     "UUP":"USD",       "HYG":"High yield",
-    "TLT":"Long bonds","IBIT":"Bitcoin", "XBI":"Biotech",
+    "TLT":"Long bonds","BTC":"Bitcoin", "XBI":"Biotech",
     "IGV":"Software", "SMH":"Semis",     "RSP":"Equal weight",
 }
 ASSET_COLORS = {
@@ -97,7 +97,7 @@ ASSET_COLORS = {
     "XLF":"#3b82f6","XLK":"#8b5cf6","XLI":"#64748b","XLV":"#06b6d4",
     "XLP":"#22c55e","XLU":"#0d9488","XLC":"#c026d3",
     "GLD":"#eab308","UUP":"#ef4444","HYG":"#a855f7",
-    "TLT":"#0ea5e9","IBIT":"#f59e0b","XBI":"#10b981","IGV":"#7c3aed",
+    "TLT":"#0ea5e9","BTC":"#f59e0b","XBI":"#10b981","IGV":"#7c3aed",
     "SMH":"#db2777","RSP":"#84cc16",
 }
 
@@ -362,7 +362,7 @@ def compute_confluence(asset: str) -> dict:
     # vol_stress = VIX elevated = bad for risk assets, good for safe havens
     # vol_calm   = VIX low = good for risk assets, safe havens lose their bid
     safe_haven_vol = {"GLD","TLT","UUP","XLP","XLV","XLU"}
-    high_beta_vol  = {"IBIT","XBI","IWM","SMH","IGV","XLC"}
+    high_beta_vol  = {"BTC","XBI","IWM","SMH","IGV","XLC"}
     if asset in safe_haven_vol:
         signals["volatility"] = +1 if vol_stress else (-1 if vol_calm else 0)
     elif asset in high_beta_vol:
@@ -400,7 +400,7 @@ def compute_confluence(asset: str) -> dict:
                 signals["fed_liq"] = +1 if fed_roc13 > 0.5 else (-1 if fed_roc13 < -0.5 else 0)
             else:
                 signals["fed_liq"] = 0
-        elif asset in ("IBIT","XBI","IWM","QQQ","XLK","IGV","SMH","XLC"):
+        elif asset in ("BTC","XBI","IWM","QQQ","XLK","IGV","SMH","XLC"):
             # Long-duration / high-beta growth: low real yields = lower discount rates
             signals["fed_liq"] = -1 if real_now > 1.5 else (+1 if real_now < 0.5 else 0)
         else:
