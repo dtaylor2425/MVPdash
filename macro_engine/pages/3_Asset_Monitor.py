@@ -3,7 +3,7 @@
 Asset Monitor
 ═══════════════════════════════════════════════════════════════════════════════
 Macro-conditional analysis for the most-traded assets:
-SPY · QQQ · GLD · IBIT (Bitcoin) · SLV (Silver)
+SPY · QQQ · GLD · BTC (Bitcoin) · SLV (Silver)
 
 For each asset:
   1. Macro alignment signal — does the current regime support this asset?
@@ -45,7 +45,7 @@ WATCH = {
     "GLD":  {"name":"Gold",         "color":"#d97706","emoji":"🥇",
              "macro_driver":"Real yields (inverted) + dollar direction",
              "driver_key":"gold"},
-    "IBIT": {"name":"Bitcoin ETF",  "color":"#f59e0b","emoji":"₿",
+    "BTC": {"name":"Bitcoin",  "color":"#f59e0b","emoji":"₿",
              "macro_driver":"Global liquidity + dollar + risk appetite",
              "driver_key":"btc"},
     "SLV":  {"name":"Silver ETF",   "color":"#94a3b8","emoji":"🥈",
@@ -220,7 +220,7 @@ def macro_alignment(ticker, regime, macro, px):
                 elif gldz < -1:signals.append(("GLD vs history",  +1, f"GLD depressed vs history — potential mean reversion"))
                 else:           signals.append(("GLD vs history",   0, f"GLD within normal historical range"))
 
-    elif ticker == "IBIT":
+    elif ticker == "BTC":
         # BTC = global liquidity + dollar (inv) + risk appetite
         if fed_roc is not None:
             if fed_roc > 0.5:   signals.append(("Fed liquidity", +1, f"Balance sheet expanding {fed_roc:+.1f}% 13w — liquidity tailwind for BTC"))
@@ -234,9 +234,9 @@ def macro_alignment(ticker, regime, macro, px):
         elif cur_score < 45: signals.append(("Risk appetite", -1, f"Score {cur_score} — risk-off, BTC correlates with drawdowns"))
         else:                signals.append(("Risk appetite",  0, f"Score {cur_score} — mixed"))
         # BTC vs GLD ratio
-        if "IBIT" in px.columns and "GLD" in px.columns:
-            ibit_gld = (px["IBIT"]/px["GLD"]).dropna()
-            bgrz = _zscore(ibit_gld)
+        if "BTC" in px.columns and "GLD" in px.columns:
+            btc_gld = (px["BTC"]/px["GLD"]).dropna()
+            bgrz = _zscore(btc_gld)
             if bgrz is not None:
                 if bgrz > 1.0:  signals.append(("BTC/GLD ratio", -1, f"BTC expensive vs GLD (z {bgrz:+.2f}) — rotation risk to GLD"))
                 elif bgrz < -1: signals.append(("BTC/GLD ratio", +1, f"BTC cheap vs GLD (z {bgrz:+.2f}) — historical entry zone"))
@@ -395,10 +395,10 @@ def build_macro_card(ticker, align_score, align_color, summary,
     if c210 is not None:
         rc = "#4aba6e" if c210 > 0.5 else ("#e84040" if c210 < 0 else "#f79400")
         data_rows += _row("CURVE 2S10S", "{:+.2f}pp".format(c210), rc)
-    if dz is not None and ticker in ("GLD", "IBIT", "SLV"):
+    if dz is not None and ticker in ("GLD", "BTC", "SLV"):
         rc = "#4aba6e" if dz < -0.5 else ("#e84040" if dz > 0.5 else "#f79400")
         data_rows += _row("DOLLAR Z", "{:+.2f}".format(dz), rc)
-    if fed_r is not None and ticker == "IBIT":
+    if fed_r is not None and ticker == "BTC":
         rc = "#4aba6e" if fed_r > 0 else "#e84040"
         data_rows += _row("FED BS 13W", "{:+.1f}%".format(fed_r), rc)
     if wr is not None:
@@ -444,7 +444,7 @@ def build_macro_card(ticker, align_score, align_color, summary,
                  else "Bear watch: HY OAS > 4.5% or real yields > 2.0%"),
         "QQQ":  "Key driver: real yield direction — falling = tailwind, rising = headwind",
         "GLD":  "Bull case holds while real yields below 1.5% or dollar weakening",
-        "IBIT": "Risk: dollar strength or credit stress (HY OAS > 4.5%)",
+        "BTC": "Risk: dollar strength or credit stress (HY OAS > 4.5%)",
         "SLV":  "Watch real yield trend — direction matters more than level",
         "XLU":  "Sensitive to rising rates — watch curve steepening as bear signal",
         "XLC":  "Long-duration growth — follows QQQ real yield sensitivity",
@@ -502,12 +502,23 @@ def build_macro_card(ticker, align_score, align_color, summary,
         "<div style='font-size:8px;color:#666;margin-top:3px;'>" + tagline + "</div>"
         "</div>"
 
-        # Win rate
+        # Alignment score block (replaces win rate)
         "<div style='margin-bottom:10px;padding-bottom:10px;"
-        "border-bottom:1px solid #1a1a1a;'>"
-        "<span style='font-size:18px;font-weight:900;color:" + wrc + ";"
-        "letter-spacing:0.5px;'>" + wr_v + "</span>"
-        "<div style='font-size:8px;color:#555;margin-top:2px;'>" + wr_s + "</div>"
+        "border-bottom:1px solid #1a1a1a;display:flex;"
+        "justify-content:space-between;align-items:center;'>"
+        "<div>"
+        "<span style='font-size:26px;font-weight:900;color:" + align_color + ";"
+        "letter-spacing:1px;line-height:1;'>" + str(align_score) + "</span>"
+        "<span style='font-size:12px;font-weight:700;color:" + align_color + ";"
+        "margin-left:4px;'>/100</span>"
+        "<div style='font-size:8px;color:#555;margin-top:3px;'>MACRO ALIGNMENT SCORE</div>"
+        "</div>"
+        "<div style='text-align:right;'>"
+        "<div style='font-size:10px;font-weight:800;color:" + align_color + ";"
+        "letter-spacing:0.8px;'>" + verdict + "</div>"
+        "<div style='font-size:8px;color:#555;margin-top:2px;'>" + tagline + "</div>"
+        "</div>"
+        "</div>"
         "</div>"
 
         # Two-column: data rows left, signal breakdown right
@@ -632,12 +643,15 @@ for tab, ticker in zip(tabs, ALL_T):
              f"{align}/100", summary,
              align_color,
              "#dcfce7" if align >= 60 else "#fee2e2" if align <= 40 else "#f3f4f6")
-        if wr is not None:
-            _kpi(kc6, f"Win Rate ({cur_label})",
-                 f"{wr:.0%}", f"n={len(cur_rets)} weeks · med {med:+.1f}%",
-                 "#1f7a4f" if wr >= 0.58 else "#b42318" if wr < 0.45 else "#6b7280")
-        else:
-            _kpi(kc6, "Win Rate", "—", "need 8+ regime weeks")
+        # 6th cell: alignment score large + coloured background (replaces win rate)
+        _align_bg = "#dcfce7" if align >= 60 else "#fee2e2" if align <= 40 else "#f3f4f6"
+        _n_pos = sum(1 for _,v,_ in signals if v > 0)
+        _n_neg = sum(1 for _,v,_ in signals if v < 0)
+        _n_tot = len(signals)
+        _kpi(kc6, "Signal Balance",
+             f"{_n_pos}✓  {_n_neg}✗",
+             f"{_n_pos} confirm · {_n_neg} against · {_n_tot} total",
+             align_color, _align_bg)
 
         st.markdown("")
 
