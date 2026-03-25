@@ -27,13 +27,13 @@ if not FRED_API_KEY:
 # ── Basket ────────────────────────────────────────────────────────────────────
 
 ASSETS = ["SPY","QQQ","IWM","XLE","XLF","XLK","XLI","XLP","XLV",
-          "XLU","XLC","GLD","UUP","HYG","TLT","IBIT","XBI","IGV","SMH","RSP"]
+          "XLU","XLC","GLD","UUP","HYG","TLT","BTC","XBI","IGV","SMH","RSP"]
 ASSET_LABELS = {
     "SPY":"S&P 500","QQQ":"Nasdaq","IWM":"Small caps","XLE":"Energy",
     "XLF":"Financials","XLK":"Technology","XLI":"Industrials","XLV":"Healthcare",
     "XLP":"Staples","XLU":"Utilities","XLC":"Comms",
     "GLD":"Gold","UUP":"USD","HYG":"High yield","TLT":"Long bonds",
-    "IBIT":"Bitcoin","XBI":"Biotech","IGV":"Software","SMH":"Semis","RSP":"Equal weight",
+    "BTC":"Bitcoin","XBI":"Biotech","IGV":"Software","SMH":"Semis","RSP":"Equal weight",
 }
 
 # ── Data ──────────────────────────────────────────────────────────────────────
@@ -367,7 +367,7 @@ def compute_dominant_trade():
     # Historical win rates — regime-conditional 4w forward returns
     hist_wr = {}
     if not reg_hist.empty:
-        for t in ["GLD","UUP","TLT","HYG","SPY","QQQ","IWM","XLE","XLF","XLP","IBIT"]:
+        for t in ["GLD","UUP","TLT","HYG","SPY","QQQ","IWM","XLE","XLF","XLP","BTC"]:
             if t not in px.columns: continue
             s   = px[t].resample("W-FRI").last().dropna()
             fwd = s.pct_change(4).shift(-4).dropna()
@@ -406,7 +406,7 @@ def compute_dominant_trade():
 
         # 1. Regime direction
         # Risk-on assets benefit from high score; safe havens from low score
-        risk_on_assets  = {"SPY","QQQ","IWM","XLE","XLF","XLK","HYG","IBIT"}
+        risk_on_assets  = {"SPY","QQQ","IWM","XLE","XLF","XLK","HYG","BTC"}
         safe_haven      = {"GLD","TLT","UUP","XLP"}
         if ticker in risk_on_assets:
             s["regime"] = +1 if (d > 0 and cur_score > 55) or (d < 0 and cur_score < 45) else                           (-1 if (d > 0 and cur_score < 45) or (d < 0 and cur_score > 55) else 0)
@@ -421,7 +421,7 @@ def compute_dominant_trade():
         credit_bullish = credit_z < -0.5
         if ticker in ("GLD","TLT","UUP","XLP"):
             s["credit"] = +1 if (d>0 and credit_bearish) or (d<0 and credit_bullish) else                           (-1 if (d>0 and credit_bullish) or (d<0 and credit_bearish) else 0)
-        elif ticker in ("HYG","SPY","IWM","XLE","XLF","IBIT"):
+        elif ticker in ("HYG","SPY","IWM","XLE","XLF","BTC"):
             s["credit"] = +1 if (d>0 and credit_bullish) or (d<0 and credit_bearish) else                           (-1 if (d>0 and credit_bearish) or (d<0 and credit_bullish) else 0)
         else:
             s["credit"] = 0
@@ -436,7 +436,7 @@ def compute_dominant_trade():
             s["real_rate"] = +1 if (d>0 and not real_rising) else                              (-1 if (d>0 and real_rising) else 0)
         elif ticker == "UUP":
             s["real_rate"] = +1 if (d>0 and real_restrictive) else                              (-1 if (d>0 and real_accommodative) else 0)
-        elif ticker in ("SPY","QQQ","IWM","IBIT"):
+        elif ticker in ("SPY","QQQ","IWM","BTC"):
             s["real_rate"] = +1 if (d>0 and real_accommodative) else                              (-1 if (d>0 and real_restrictive) else 0)
         elif ticker == "XLE":
             # Energy likes inflation, not just real rates
@@ -465,7 +465,7 @@ def compute_dominant_trade():
         dollar_weak   = dollar_z < -0.5
         if ticker == "UUP":
             s["dollar"] = +1 if (d>0 and dollar_strong) or (d<0 and dollar_weak) else                           (-1 if (d>0 and dollar_weak) or (d<0 and dollar_strong) else 0)
-        elif ticker in ("GLD","IBIT","XLE"):   # inversely correlated with dollar
+        elif ticker in ("GLD","BTC","XLE"):   # inversely correlated with dollar
             s["dollar"] = +1 if (d>0 and dollar_weak) or (d<0 and dollar_strong) else                           (-1 if (d>0 and dollar_strong) or (d<0 and dollar_weak) else 0)
         elif ticker in ("SPY","IWM"):          # mildly negative dollar correlation
             s["dollar"] = +1 if (d>0 and not dollar_strong) else                           (-1 if (d>0 and dollar_strong) else 0)
@@ -481,7 +481,7 @@ def compute_dominant_trade():
             s["inflation"] = +1 if (d>0 and infl_rising) else                              (-1 if (d>0 and infl_falling) else 0)
         elif ticker == "TLT":        # bonds hate inflation
             s["inflation"] = +1 if (d>0 and infl_falling) else                              (-1 if (d>0 and infl_rising) else 0)
-        elif ticker == "IBIT":       # bitcoin loosely tracks inflation narratives
+        elif ticker == "BTC":       # bitcoin loosely tracks inflation narratives
             s["inflation"] = +1 if (d>0 and infl_rising) else 0
         else:
             s["inflation"] = 0
@@ -545,7 +545,7 @@ def compute_dominant_trade():
         ("XLP",  "Defensives",    "long",
          f"Regime {cur_score}/100 (deteriorating) · credit z {credit_z:+.2f} · vix z {vix_z:+.2f}. "
          f"Defensives outperform when macro is deteriorating and vol is rising."),
-        ("IBIT", "Bitcoin",       "long",
+        ("BTC", "Bitcoin",       "long",
          f"Dollar z {dollar_z:+.2f} · real yield z {real_z:+.2f} · regime {cur_score}. "
          f"Bitcoin historically positively correlated with risk appetite and dollar weakness."),
     ]
@@ -1130,7 +1130,7 @@ st.markdown(
     "Asset watchlist — macro alignment</div>", unsafe_allow_html=True)
 
 _WATCH_T = [("SPY","S&P 500","#1d4ed8"),("QQQ","Nasdaq","#7c3aed"),
-            ("GLD","Gold","#d97706"),("IBIT","Bitcoin","#f59e0b"),("SLV","Silver","#94a3b8")]
+            ("GLD","Gold","#d97706"),("BTC","Bitcoin","#f59e0b"),("SLV","Silver","#94a3b8")]
 
 def _quick_alignment(ticker, macro, px, cur_score, cur_label):
     """Fast alignment read — 3 key signals only."""
@@ -1159,7 +1159,7 @@ def _quick_alignment(ticker, macro, px, cur_score, cur_label):
         elif r10 and r10 < 0.5: score += 20
         if dz and dz < -0.5: score += 15
         elif dz and dz > 0.5: score -= 15
-    elif ticker == "IBIT":
+    elif ticker == "BTC":
         if cur_score > 55: score += 20
         elif cur_score < 45: score -= 20
         if dz and dz < -0.5: score += 15
