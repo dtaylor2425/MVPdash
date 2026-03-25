@@ -54,6 +54,7 @@ _PAGES = {
     "Transition Watch":  "pages/8_Transition_Watch.py",
     # ── Market views ──────────────────────────────────
     "Fed & Liquidity":   "pages/10_Fed_Liquidity.py",
+    "Asset Monitor":     "pages/3_Asset_Monitor.py",
     "Curve View":        "pages/9_Curve_View.py",
     "Volatility View":   "pages/6_Volatility_View.py",
     "Credit & Macro":    "pages/2_Macro_Charts.py",
@@ -84,6 +85,7 @@ _NAV_META = {
     "Regime Playbook":   ("📋", "analysis",  "Actionable signals"),
     "Transition Watch":  ("🔔", "analysis",  "Regime change alerts"),
     "Fed & Liquidity":   ("🏦", "markets",   "Policy backbone"),
+    "Asset Monitor":     ("📡", "markets",   "SPY QQQ GLD BTC SLV"),
     "Curve View":        ("📐", "markets",   "Yield curve"),
     "Volatility View":   ("⚡", "markets",   "VIX & stress"),
     "Credit & Macro":    ("📊", "markets",   "Credit & spreads"),
