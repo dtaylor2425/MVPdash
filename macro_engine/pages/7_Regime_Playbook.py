@@ -82,11 +82,12 @@ if not FRED_API_KEY:
 # ── Basket ────────────────────────────────────────────────────────────────────
 
 ASSETS = ["SPY","QQQ","IWM","XLE","XLF","XLK","XLI","XLV","XLP",
-          "GLD","UUP","HYG","TLT","IBIT","XBI","IGV","SMH","RSP"]
+          "XLU","XLC","GLD","UUP","HYG","TLT","IBIT","XBI","IGV","SMH","RSP"]
 ASSET_LABELS = {
     "SPY":"S&P 500",  "QQQ":"Nasdaq",    "IWM":"Small caps",
     "XLE":"Energy",   "XLF":"Financials","XLK":"Technology",
     "XLI":"Industrials","XLV":"Healthcare","XLP":"Staples",
+    "XLU":"Utilities","XLC":"Comms",
     "GLD":"Gold",     "UUP":"USD",       "HYG":"High yield",
     "TLT":"Long bonds","IBIT":"Bitcoin", "XBI":"Biotech",
     "IGV":"Software", "SMH":"Semis",     "RSP":"Equal weight",
@@ -94,7 +95,8 @@ ASSET_LABELS = {
 ASSET_COLORS = {
     "SPY":"#1d4ed8","QQQ":"#6366f1","IWM":"#ec4899","XLE":"#f97316",
     "XLF":"#3b82f6","XLK":"#8b5cf6","XLI":"#64748b","XLV":"#06b6d4",
-    "XLP":"#22c55e","GLD":"#eab308","UUP":"#ef4444","HYG":"#a855f7",
+    "XLP":"#22c55e","XLU":"#0d9488","XLC":"#c026d3",
+    "GLD":"#eab308","UUP":"#ef4444","HYG":"#a855f7",
     "TLT":"#0ea5e9","IBIT":"#f59e0b","XBI":"#10b981","IGV":"#7c3aed",
     "SMH":"#db2777","RSP":"#84cc16",
 }
@@ -278,118 +280,170 @@ def compute_confluence(asset: str) -> dict:
     """
     signals = {}
 
-    # Signal 1: Regime direction
-    if cur_score >= 60:   signals["regime"] = +1
-    elif cur_score <= 40: signals["regime"] = -1
-    else:                 signals["regime"] = 0
-    # Adjust for assets that are inversely correlated with risk
-    if asset in ("TLT","UUP","GLD"):
-        signals["regime"] = -signals["regime"]
-
-    # Signal 2: Curve regime
-    c210 = None
-    if "y10" in macro.columns and "y2" in macro.columns:
-        curve = (macro["y10"] - macro["y2"]).dropna()
-        c210 = _last(curve)
-    curve_z  = _zscore_last((macro["y10"] - macro["y2"]).dropna()) \
+    # ── Pre-compute shared z-scores ───────────────────────────────────────────
+    curve_z  = _zscore_last((macro["y10"]-macro["y2"]).dropna()) \
                if "y10" in macro.columns and "y2" in macro.columns else None
+    real_now = _last(macro["real10"].dropna()) if "real10" in macro.columns else None
+    real_z   = _zscore_last(macro["real10"].dropna()) if "real10" in macro.columns else None
+    credit_z = _zscore_last(macro["hy_oas"].dropna()) if "hy_oas" in macro.columns else None
+    dollar_z = _zscore_last(macro["dollar_broad"].dropna()) if "dollar_broad" in macro.columns else None
+
+    fed_roc13 = None
+    if "fed_assets" in macro.columns and len(macro["fed_assets"].dropna()) >= 70:
+        fed_roc13 = float(macro["fed_assets"].dropna().pct_change(63).iloc[-1]*100)
+
+    # VIX / volatility state
+    vix_t   = YF_PROXIES.get("vix"); vix3m_t = YF_PROXIES.get("vix3m")
+    vix_pct = vratio = None
+    if vix_t and vix_t in px.columns:
+        vix_s = px[vix_t].dropna()
+        if len(vix_s) >= 252:
+            vix_pct = float((vix_s.iloc[-252:] < vix_s.iloc[-1]).mean()*100)
+        if vix3m_t and vix3m_t in px.columns:
+            v3m = px[vix3m_t].dropna()
+            idx = vix_s.index.intersection(v3m.index)
+            if len(idx) > 0:
+                vratio = float(vix_s.loc[idx[-1]] / v3m.loc[idx[-1]])
+    vol_stress = (vix_pct is not None and vix_pct > 75) or (vratio is not None and vratio > 1.0)
+    vol_calm   = (vix_pct is not None and vix_pct < 30) and (vratio is None or vratio < 0.9)
+
+    # ── Signal 1: Regime direction ────────────────────────────────────────────
+    # Regime score > 60 = macro is risk-on = good for risk assets, bad for safe havens
+    # SIGN CONVENTION: +1 means the signal is BULLISH FOR THIS SPECIFIC ASSET
+    if cur_score >= 60:   raw_reg = +1
+    elif cur_score <= 40: raw_reg = -1
+    else:                 raw_reg = 0
+
+    # These assets are inversely correlated with macro risk-on:
+    # High score (risk-on) is BAD for them; low score (risk-off) is GOOD
+    safe_haven_reg = {"TLT", "UUP", "GLD", "XLP", "XLV", "XLU"}
+    if asset in safe_haven_reg:
+        signals["regime"] = -raw_reg   # flip: high score = bearish for safe havens
+    else:
+        signals["regime"] = raw_reg    # risk assets: high score = bullish
+
+    # ── Signal 2: Curve regime ────────────────────────────────────────────────
+    # curve_z > 0 = steepening = growth signal, good for cyclicals/banks
+    # curve_z < 0 = flattening/inverting = late-cycle, bad for cyclicals
+    # KEY FIX: TLT signal is driven by real yield DIRECTION, not curve slope.
+    # A bear-flattener (short rates rising fast) is bad for TLT even though
+    # the curve is "flat". We use real_z as the TLT curve proxy.
     if curve_z is not None:
-        if asset in ("XLF",):  # banks love steep curve
+        if asset == "XLF":
+            # Banks: steep curve = wider net interest margin = bullish
             signals["curve"] = +1 if curve_z > 0.3 else (-1 if curve_z < -0.5 else 0)
-        elif asset in ("TLT",):  # long bonds hate rising rates
-            signals["curve"] = +1 if curve_z < -0.5 else (-1 if curve_z > 0.5 else 0)
-        elif asset in ("XLE","XLI","IWM"):  # cyclicals like steep curve
+        elif asset == "TLT":
+            # Long bonds: use real yield DIRECTION not curve slope
+            # Falling real yields = bonds rally. Rising = bonds fall.
+            if real_z is not None:
+                signals["curve"] = +1 if real_z < -0.5 else (-1 if real_z > 0.5 else 0)
+            else:
+                signals["curve"] = 0
+        elif asset == "XLU":
+            # Utilities = bond proxy. Steep curve = competition from bonds = bearish XLU
+            # Flat/falling curve = supportive for yield-seeking stocks
+            signals["curve"] = +1 if curve_z < -0.3 else (-1 if curve_z > 0.5 else 0)
+        elif asset in ("XLE","XLI","IWM","XLC"):
+            # Cyclicals + Comms: steep curve signals growth expectations = bullish
             signals["curve"] = +1 if curve_z > 0.2 else (-1 if curve_z < -0.5 else 0)
-        elif asset in ("XLP","XLV"):  # defensives fine with any curve
+        elif asset in ("QQQ","XLK","IGV","SMH","XBI"):
+            # Long-duration growth: flatter curve = lower long-term discount rates
+            # But real yields capture this better; curve here is secondary
+            signals["curve"] = +1 if curve_z < -0.3 else (-1 if curve_z > 0.5 else 0)
+        elif asset in ("XLP","XLV","GLD"):
+            # Defensives and gold: not driven by curve slope
             signals["curve"] = 0
         else:
             signals["curve"] = +1 if curve_z > 0.3 else (-1 if curve_z < -0.5 else 0)
     else:
         signals["curve"] = 0
 
-    # Signal 3: Volatility regime (VIX percentile + V-Ratio)
-    vix_t  = YF_PROXIES.get("vix")
-    vix3m_t = YF_PROXIES.get("vix3m")
-    vix_pct = None
-    vratio  = None
-    if vix_t and vix_t in px.columns:
-        vix_s = px[vix_t].dropna()
-        if len(vix_s) >= 252:
-            vix_pct = float((vix_s.iloc[-252:] < vix_s.iloc[-1]).mean() * 100)
-        if vix3m_t and vix3m_t in px.columns:
-            v3m = px[vix3m_t].dropna()
-            idx = vix_s.index.intersection(v3m.index)
-            if len(idx) > 0:
-                vratio = float(vix_s.loc[idx[-1]] / v3m.loc[idx[-1]])
-
-    vol_stress = (vix_pct is not None and vix_pct > 75) or \
-                 (vratio is not None and vratio > 1.0)
-    vol_calm   = (vix_pct is not None and vix_pct < 30) and \
-                 (vratio is None or vratio < 0.9)
-
-    if asset in ("GLD","TLT","UUP"):
+    # ── Signal 3: Volatility regime ───────────────────────────────────────────
+    # vol_stress = VIX elevated = bad for risk assets, good for safe havens
+    # vol_calm   = VIX low = good for risk assets, safe havens lose their bid
+    safe_haven_vol = {"GLD","TLT","UUP","XLP","XLV","XLU"}
+    high_beta_vol  = {"IBIT","XBI","IWM","SMH","IGV","XLC"}
+    if asset in safe_haven_vol:
         signals["volatility"] = +1 if vol_stress else (-1 if vol_calm else 0)
-    elif asset in ("IBIT","XBI","IWM","SMH","IGV"):  # high-beta
+    elif asset in high_beta_vol:
         signals["volatility"] = -1 if vol_stress else (+1 if vol_calm else 0)
     else:
         signals["volatility"] = -1 if vol_stress else (+1 if vol_calm else 0)
 
-    # Signal 4: Fed / liquidity stance
-    real_now = _last(macro["real10"].dropna()) if "real10" in macro.columns else None
-    fed_roc13 = None
-    if "fed_assets" in macro.columns and len(macro["fed_assets"].dropna()) >= 70:
-        fed_roc13 = float(macro["fed_assets"].dropna().pct_change(63).iloc[-1] * 100)
-
-    if real_now is not None:
-        if asset in ("TLT",):
+    # ── Signal 4: Real yields / Fed stance ────────────────────────────────────
+    # This is the most important signal for rate-sensitive assets.
+    # real_now > 1.5% = restrictive = headwind for equities/GLD, tailwind for UUP
+    # real_now < 0.5% = accommodative = tailwind for equities/GLD, headwind for UUP
+    # real_z direction: rising = tightening (bearish most assets), falling = easing
+    if real_now is not None and real_z is not None:
+        if asset == "TLT":
+            # TLT: falling real yields → bond prices rise. Rising → prices fall.
+            # Use real_z direction as the signal
+            signals["fed_liq"] = +1 if real_z < -0.5 else (-1 if real_z > 0.5 else 0)
+        elif asset == "GLD":
+            # GLD: low/falling real yields = no opportunity cost to hold gold
+            # High real yields = strong alternative = bearish for GLD
             signals["fed_liq"] = +1 if real_now < 0.5 else (-1 if real_now > 1.5 else 0)
-        elif asset in ("GLD",):
-            signals["fed_liq"] = +1 if real_now < 0.5 else (-1 if real_now > 1.5 else 0)
-        elif asset in ("UUP",):
+        elif asset == "UUP":
+            # USD: restrictive real yields attract foreign capital inflows
             signals["fed_liq"] = +1 if real_now > 1.0 else (-1 if real_now < 0.3 else 0)
-        elif asset in ("IBIT","XBI","IWM"):  # rate-sensitive growth
+        elif asset == "XLU":
+            # Utilities: bond-proxy dividend stocks. Low rates = cheap funding + yield attractive
+            signals["fed_liq"] = +1 if real_now < 0.8 else (-1 if real_now > 1.5 else 0)
+        elif asset == "XLF":
+            # Banks: moderate real yields = healthy margins. Very high = credit stress.
+            signals["fed_liq"] = +1 if (real_now is not None and 0.5 < real_now < 2.0) \
+                                  else (-1 if (real_now is not None and real_now > 2.5) else 0)
+        elif asset == "XLE":
+            # Energy driven by growth/inflation not real yields — use Fed BS impulse
+            if fed_roc13 is not None:
+                signals["fed_liq"] = +1 if fed_roc13 > 0.5 else (-1 if fed_roc13 < -0.5 else 0)
+            else:
+                signals["fed_liq"] = 0
+        elif asset in ("IBIT","XBI","IWM","QQQ","XLK","IGV","SMH","XLC"):
+            # Long-duration / high-beta growth: low real yields = lower discount rates
             signals["fed_liq"] = -1 if real_now > 1.5 else (+1 if real_now < 0.5 else 0)
         else:
+            # Default: restrictive rates are a headwind for most equity assets
             signals["fed_liq"] = -1 if real_now > 1.5 else (+1 if real_now < 0.5 else 0)
     else:
         signals["fed_liq"] = 0
 
-    # Signal 5: Asset momentum z-score (price vs 63d MA, then z-score that RoC)
+    # ── Signal 5: Price momentum ───────────────────────────────────────────────
+    # Requires BOTH trend (above 63d MA) AND positive RoC z-score for a long signal
+    # Requires BOTH below MA AND negative RoC z-score for a short signal
+    # Mixed signals = 0 (not a clean momentum setup)
     mom_signal = 0
     if asset in px.columns:
         s = px[asset].dropna()
         if len(s) >= 63:
             ma63  = float(s.rolling(63).mean().iloc[-1])
             above = s.iloc[-1] > ma63
-            # Rate of change z-score
             roc   = s.pct_change(21).dropna()
             roc_z = _zscore_last(roc)
             if roc_z is not None:
-                mom_signal = +1 if roc_z > 0.5 else (-1 if roc_z < -0.5 else 0)
-            if not above and mom_signal == +1:
-                mom_signal = 0  # need trend AND momentum both
+                if above and roc_z > 0.5:         mom_signal = +1
+                elif not above and roc_z < -0.5:  mom_signal = -1
     signals["momentum"] = mom_signal
 
-    # Signal 6: Mean-reversion risk (stretched valuation = caution)
+    # ── Signal 6: Mean-reversion / valuation stretch ──────────────────────────
+    # Price z-score vs 252d history. Only fires at extremes (z > 2.0 or < -2.0)
     mr_signal = 0
     if asset in px.columns:
-        s = px[asset].dropna()
+        s  = px[asset].dropna()
         lz = _zscore_last(s, 252)
         if lz is not None:
-            # Very stretched up = reversion risk = slightly bearish signal
-            # Very stretched down = bounce potential = slightly bullish
-            if lz > 2.0:   mr_signal = -1
-            elif lz > 1.5: mr_signal = 0
-            elif lz < -2.0: mr_signal = +1
-            elif lz < -1.5: mr_signal = 0
+            if lz > 2.0:    mr_signal = -1   # stretched → reversion risk
+            elif lz < -2.0: mr_signal = +1   # depressed → bounce potential
     signals["mean_rev"] = mr_signal
 
     confluence = sum(signals.values())
     return {
-        "signals": signals,
+        "signals":    signals,
         "confluence": confluence,
-        "abs_conf": abs(confluence),
-        "direction": "bullish" if confluence > 0 else ("bearish" if confluence < 0 else "neutral"),
+        "abs_conf":   abs(confluence),
+        # direction = "long" means the net signal is bullish for this asset
+        "direction":  "long" if confluence > 0 else ("short" if confluence < 0 else "neutral"),
     }
 
 # ── 4. Factor rotation model ──────────────────────────────────────────────────
@@ -749,7 +803,7 @@ def build_trade_table(_ret_dist, _cur_label, _assets):
             "kelly_25":       kelly_trade,
             "ann_sharpe":     sharpe_trade,
             "confluence":     c,
-            "conf_dir":       conf["direction"],
+            "conf_dir":       conf["direction"],   # "long" or "short"
             "signals":        conf["signals"],
             "alpha_score":    alpha,
             "n_obs":          int(row["n"]),
