@@ -27,11 +27,12 @@ if not FRED_API_KEY:
 # ── Basket ────────────────────────────────────────────────────────────────────
 
 ASSETS = ["SPY","QQQ","IWM","XLE","XLF","XLK","XLI","XLP","XLV",
-          "GLD","UUP","HYG","TLT","IBIT","XBI","IGV","SMH","RSP"]
+          "XLU","XLC","GLD","UUP","HYG","TLT","IBIT","XBI","IGV","SMH","RSP"]
 ASSET_LABELS = {
     "SPY":"S&P 500","QQQ":"Nasdaq","IWM":"Small caps","XLE":"Energy",
     "XLF":"Financials","XLK":"Technology","XLI":"Industrials","XLV":"Healthcare",
-    "XLP":"Staples","GLD":"Gold","UUP":"USD","HYG":"High yield","TLT":"Long bonds",
+    "XLP":"Staples","XLU":"Utilities","XLC":"Comms",
+    "GLD":"Gold","UUP":"USD","HYG":"High yield","TLT":"Long bonds",
     "IBIT":"Bitcoin","XBI":"Biotech","IGV":"Software","SMH":"Semis","RSP":"Equal weight",
 }
 
@@ -506,6 +507,7 @@ def compute_dominant_trade():
     # ── Asset universe to score ───────────────────────────────────────────────
 
     # Each tuple: (ticker, display_name, direction, rationale_template)
+    # XLU and XLC added as scoreable assets in the universe
     UNIVERSE = [
         ("GLD",  "Gold",          "long",
          f"Real yield {fmt(real_now, suffix='%')} · dollar z {dollar_z:+.2f} · inflation z {cpi_z:+.2f}. "
@@ -1114,6 +1116,102 @@ with st.container(border=True):
             f"<div style='font-size:11px;font-weight:800;color:#0f172a;margin-bottom:4px;'>{main}</div>"
             f"<div style='font-size:10px;color:rgba(0,0,0,0.50);line-height:1.4;'>{detail}</div>"
             f"</div>", unsafe_allow_html=True)
+
+st.markdown("")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ASSET WATCHLIST — quick macro alignment for the 5 most-traded assets
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.markdown(
+    "<div style='font-size:10px;font-weight:700;color:rgba(0,0,0,0.45);"
+    "text-transform:uppercase;letter-spacing:0.8px;margin:4px 0 10px;"
+    "padding-bottom:6px;border-bottom:1px solid rgba(0,0,0,0.07);'>"
+    "Asset watchlist — macro alignment</div>", unsafe_allow_html=True)
+
+_WATCH_T = [("SPY","S&P 500","#1d4ed8"),("QQQ","Nasdaq","#7c3aed"),
+            ("GLD","Gold","#d97706"),("IBIT","Bitcoin","#f59e0b"),("SLV","Silver","#94a3b8")]
+
+def _quick_alignment(ticker, macro, px, cur_score, cur_label):
+    """Fast alignment read — 3 key signals only."""
+    score = 50; signals = []
+    r10 = float(macro["real10"].dropna().iloc[-1]) if "real10" in macro.columns and not macro["real10"].dropna().empty else None
+    dz  = None
+    if "dollar_broad" in macro.columns:
+        d = macro["dollar_broad"].dropna()
+        if len(d) >= 30:
+            t = d.iloc[-min(252,len(d)):]
+            sd = float(t.std())
+            dz = float((t.iloc[-1]-t.mean())/sd) if sd > 0 else 0
+
+    if ticker == "SPY":
+        if cur_score > 55: score += 20
+        elif cur_score < 45: score -= 20
+        if r10 and r10 > 1.5: score -= 10
+        elif r10 and r10 < 0.5: score += 10
+    elif ticker == "QQQ":
+        if r10 and r10 > 1.5: score -= 25
+        elif r10 and r10 < 0.5: score += 25
+        if cur_score > 55: score += 10
+        elif cur_score < 45: score -= 10
+    elif ticker == "GLD":
+        if r10 and r10 > 1.5: score -= 20
+        elif r10 and r10 < 0.5: score += 20
+        if dz and dz < -0.5: score += 15
+        elif dz and dz > 0.5: score -= 15
+    elif ticker == "IBIT":
+        if cur_score > 55: score += 20
+        elif cur_score < 45: score -= 20
+        if dz and dz < -0.5: score += 15
+        elif dz and dz > 0.5: score -= 15
+    elif ticker == "SLV":
+        if r10 and r10 > 1.5: score -= 15
+        elif r10 and r10 < 0.5: score += 15
+        if dz and dz < -0.5: score += 10
+        elif dz and dz > 0.5: score -= 10
+
+    score = max(0, min(100, score))
+    if score >= 65:   label, col = "Bullish", "#1f7a4f"
+    elif score >= 55: label, col = "Tailwind", "#16a34a"
+    elif score >= 45: label, col = "Neutral",  "#6b7280"
+    elif score >= 35: label, col = "Headwind", "#d97706"
+    else:             label, col = "Bearish",  "#b42318"
+    return score, label, col
+
+_watch_cols = st.columns(5, gap="small")
+for _wc, (ticker, name, tcolor) in zip(_watch_cols, _WATCH_T):
+    _price = None
+    _ret1w = None
+    if ticker in px.columns:
+        _s = px[ticker].dropna()
+        if not _s.empty:
+            _price = float(_s.iloc[-1])
+            _prev  = _s.index[_s.index <= _s.index.max() - pd.Timedelta(days=7)]
+            if len(_prev): _ret1w = float(_s.iloc[-1]/_s.loc[_prev[-1]] - 1)*100
+
+    _align, _albl, _acol = _quick_alignment(ticker, macro, px, cur_score, cur_label)
+    _abg = "#dcfce7" if _align >= 60 else "#fee2e2" if _align <= 40 else "#f3f4f6"
+
+    _wc.markdown(
+        f"<div style='padding:10px 12px;border-radius:12px;background:#ffffff;"
+        f"border:1px solid rgba(0,0,0,0.08);border-top:3px solid {tcolor};'>"
+        f"<div style='font-size:10px;font-weight:800;color:{tcolor};"
+        f"margin-bottom:2px;'>{ticker}</div>"
+        f"<div style='font-size:9px;color:rgba(0,0,0,0.45);margin-bottom:6px;'>{name}</div>"
+        f"<div style='font-size:15px;font-weight:900;color:rgba(0,0,0,0.85);margin-bottom:4px;'>"
+        f"{'${:,.2f}'.format(_price) if _price else '—'}</div>"
+        f"<div style='font-size:10px;font-weight:700;"
+        f"color:{'#1f7a4f' if _ret1w and _ret1w>0 else '#b42318'};margin-bottom:8px;'>"
+        f"{f'{_ret1w:+.1f}% 1w' if _ret1w is not None else ''}</div>"
+        f"<div style='padding:3px 8px;border-radius:6px;background:{_abg};"
+        f"display:inline-block;'>"
+        f"<span style='font-size:10px;font-weight:800;color:{_acol};'>"
+        f"{_albl}</span></div>"
+        f"</div>", unsafe_allow_html=True)
+
+st.markdown("")
+if st.button("Full asset analysis →", key="btn_asset_mon", use_container_width=False):
+    safe_switch_page("pages/3_Asset_Monitor.py")
 
 st.markdown("")
 
