@@ -50,7 +50,7 @@ How copulas modify the pair score:
 
 Basket
 ───────
-XLE XLF XLK XLI XLP XLV GLD IWM QQQ TLT HYG IBIT XBI UUP SPY
+XLE XLF XLK XLI XLP XLV GLD IWM QQQ TLT HYG BTC XBI UUP SPY
 """
 
 import itertools
@@ -78,21 +78,21 @@ sidebar_nav(active="Rotation & setups")
 BASKET = [
     "XLE", "XLF", "XLK", "XLI", "XLP", "XLV",
     "GLD", "IWM", "QQQ", "TLT", "HYG",
-    "IBIT", "XBI", "UUP", "SPY",
+    "BTC", "XBI", "UUP", "SPY",
 ]
 
 LABELS = {
     "XLE": "Energy",     "XLF": "Financials",  "XLK": "Technology",
     "XLI": "Industrials","XLP": "Staples",      "XLV": "Healthcare",
     "GLD": "Gold",       "IWM": "Small caps",   "QQQ": "Nasdaq",
-    "TLT": "Long bonds", "HYG": "High yield",   "IBIT": "Bitcoin",
+    "TLT": "Long bonds", "HYG": "High yield",   "BTC": "Bitcoin",
     "XBI": "Biotech",    "UUP": "USD",          "SPY": "S&P 500",
 }
 
 TICKER_COLORS = {
     "XLE": "#f97316", "XLF": "#3b82f6", "XLK": "#8b5cf6", "XLI": "#64748b",
     "XLP": "#22c55e", "XLV": "#06b6d4", "GLD": "#eab308", "IWM": "#ec4899",
-    "QQQ": "#6366f1", "TLT": "#0ea5e9", "HYG": "#a855f7", "IBIT": "#f59e0b",
+    "QQQ": "#6366f1", "TLT": "#0ea5e9", "HYG": "#a855f7", "BTC": "#f59e0b",
     "XBI": "#10b981", "UUP": "#ef4444", "SPY": "#1d4ed8",
 }
 
@@ -107,7 +107,7 @@ HORIZONS = {"1w": 5, "1m": 21, "3m": 63, "6m": 126}
 # SPY is kept for RS/RRG context but excluded from pair signal cards entirely.
 
 SECTOR_ETFS  = {"XLE","XLF","XLK","XLI","XLP","XLV","IWM","QQQ","XBI"}
-ALTERNATES   = {"GLD","HYG","IBIT","TLT","UUP"}
+ALTERNATES   = {"GLD","HYG","BTC","TLT","UUP"}
 # SPY excluded from pair cards — it's the benchmark, not a trade leg
 PAIR_EXCLUDE = {"SPY"}
 # Macro anchors (directional dollar/rates bets) — capped more aggressively
