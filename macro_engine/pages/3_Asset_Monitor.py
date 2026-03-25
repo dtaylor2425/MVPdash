@@ -296,21 +296,25 @@ def macro_alignment(ticker, regime, macro, px):
 def build_macro_card(ticker, align_score, align_color, summary,
                      signals, regime_rets, macro, px):
     """
-    Build a visual HTML macro snapshot card — designed to be screenshotted
-    and attached to X/Substack comments. Bloomberg-terminal aesthetic.
-    Returns raw HTML string.
+    Visual Bloomberg-style macro snapshot card for social media attachment.
+    Hierarchy: (1) big verdict headline, (2) win rate stat, (3) key drivers,
+    (4) signal dots, (5) falsification condition.
     """
-    meta = WATCH[ticker]
-    r10  = _last(macro["real10"].dropna()) if "real10" in macro.columns else None
-    hy   = _last(macro["hy_oas"].dropna())  if "hy_oas"  in macro.columns else None
-    dz   = _zscore(macro["dollar_broad"])   if "dollar_broad" in macro.columns else None
+    meta  = WATCH[ticker]
+    r10   = _last(macro["real10"].dropna())   if "real10"       in macro.columns else None
+    hy    = _last(macro["hy_oas"].dropna())   if "hy_oas"       in macro.columns else None
+    dz    = _zscore(macro["dollar_broad"])    if "dollar_broad" in macro.columns else None
+    fed_r = None
+    if "fed_assets" in macro.columns:
+        fa = macro["fed_assets"].dropna()
+        if len(fa) >= 70: fed_r = float(fa.pct_change(63).iloc[-1]*100)
     c210 = None
     if "y10" in macro.columns and "y2" in macro.columns:
         c210 = _last((macro["y10"]-macro["y2"]).dropna())
 
     price = ma200_pct = ret_1w = ret_1m = None
     if ticker in px.columns:
-        s = px[ticker].dropna()
+        s      = px[ticker].dropna()
         price  = _last(s)
         ret_1w = _ret(s, 7); ret_1m = _ret(s, 30)
         ma200  = _ma(s, 200)
@@ -320,144 +324,192 @@ def build_macro_card(ticker, align_score, align_color, summary,
     cur_rets = regime_rets.get(cur_label, [])
     wr  = (sum(1 for r in cur_rets if r > 0)/len(cur_rets)) if len(cur_rets) >= 8 else None
     med = float(np.median(cur_rets))*100 if cur_rets else None
+    p25 = float(np.percentile(cur_rets,25))*100 if len(cur_rets) >= 8 else None
+    p75 = float(np.percentile(cur_rets,75))*100 if len(cur_rets) >= 8 else None
 
-    pos_sigs = [(l,t) for l,v,t in signals if v > 0]
-    neg_sigs = [(l,t) for l,v,t in signals if v < 0]
+    pos_sigs = [(l,v,t) for l,v,t in signals if v > 0]
+    neg_sigs = [(l,v,t) for l,v,t in signals if v < 0]
+    neu_sigs = [(l,v,t) for l,v,t in signals if v == 0]
+    n_pos = len(pos_sigs); n_neg = len(neg_sigs); n_tot = len(signals)
 
-    # Verdict text
-    n_conf = len(pos_sigs); n_against = len(neg_sigs); n_total = len(signals)
-    if align_score >= 60:
-        verdict = f"MACRO TAILWIND"
-        verdict_detail = f"{n_conf} of {n_total} signals confirm this trade"
-    elif align_score <= 40:
-        verdict = f"MACRO HEADWIND"
-        verdict_detail = f"{n_against} of {n_total} signals working against"
+    # ── Headline verdict ──────────────────────────────────────────────────────
+    if align_score >= 65:
+        verdict = "MACRO ALIGNED ▲"
+        verdict_color = "#4aba6e"
+        tagline = f"Regime + macro both support this trade"
+    elif align_score >= 55:
+        verdict = "MILD TAILWIND ▲"
+        verdict_color = "#4aba6e"
+        tagline = f"More signals in favour than against"
+    elif align_score >= 45:
+        verdict = "SIGNALS MIXED →"
+        verdict_color = "#f79400"
+        tagline = f"{n_pos} confirm · {n_neg} against — no directional edge"
+    elif align_score >= 33:
+        verdict = "MILD HEADWIND ▼"
+        verdict_color = "#f79400"
+        tagline = f"More macro signals working against than for"
     else:
-        verdict = "MIXED SIGNALS"
-        verdict_detail = f"{n_conf} confirm · {n_against} against · {n_total-n_conf-n_against} neutral"
+        verdict = "MACRO AGAINST ▼"
+        verdict_color = "#e84040"
+        tagline = f"{n_neg} of {n_tot} signals pointing against this trade"
 
-    # Regime bar segments (5 buckets)
-    seg_labels = ["Risk Off","Bearish","Neutral","Bullish","Risk On"]
-    seg_colors = {"Risk Off":"#b42318","Bearish":"#d97706","Neutral":"#6b7280",
-                  "Bullish":"#16a34a","Risk On":"#1f7a4f"}
-    segs_html = ""
-    for lbl in seg_labels:
-        is_cur = (lbl == cur_label)
-        sc = seg_colors[lbl]
-        segs_html += (f"<div style='flex:1;height:6px;border-radius:2px;"
-                      f"background:{sc};opacity:{'1' if is_cur else '0.25'};"
-                      f"margin:0 1px;'></div>")
+    # ── Win rate headline ─────────────────────────────────────────────────────
+    if wr is not None:
+        wr_color = "#4aba6e" if wr >= 0.58 else "#e84040" if wr < 0.45 else "#f79400"
+        wr_str = f"{wr:.0%} WIN RATE"
+        wr_sub = f"in {cur_label} regimes · median {med:+.1f}% · n={len(cur_rets)}"
+    else:
+        wr_color = "#555"; wr_str = "—"; wr_sub = "insufficient history"
 
-    # Top signals rows
-    sig_rows_html = ""
-    for lbl, text in (pos_sigs + neg_sigs)[:4]:
-        is_pos = any(lbl == l and v > 0 for l,v,t in signals)
-        sc = "#4aba6e" if is_pos else "#e84040"
-        icon = "▲" if is_pos else "▼"
-        sig_rows_html += (
-            f"<div style='display:flex;justify-content:space-between;"
-            f"align-items:center;padding:4px 0;border-bottom:1px solid #1e1e1e;'>"
-            f"<span style='font-size:9px;color:#888;font-family:Courier New,monospace;'>"
-            f"{lbl.upper()}</span>"
-            f"<span style='font-size:9px;font-weight:700;color:{sc};"
-            f"font-family:Courier New,monospace;'>{icon}</span>"
-            f"</div>")
-
-    # Key data rows
-    def _kv(label, value, color="#c8c8c8"):
-        return (f"<div style='display:flex;justify-content:space-between;"
-                f"padding:3px 0;border-bottom:1px solid #1a1a1a;'>"
-                f"<span style='font-size:9px;color:#666;font-family:Courier New,monospace;'>"
-                f"{label}</span>"
-                f"<span style='font-size:9px;font-weight:700;color:{color};"
-                f"font-family:Courier New,monospace;'>{value}</span>"
-                f"</div>")
-
-    data_rows = ""
-    if price:
-        rc = "#4aba6e" if ret_1w and ret_1w > 0 else "#e84040"
-        data_rows += _kv("PRICE", f"${price:,.2f}", "#f0f0f0")
-    if ret_1w is not None:
-        rc = "#4aba6e" if ret_1w > 0 else "#e84040"
-        data_rows += _kv("1W RTN", f"{ret_1w*100:+.1f}%", rc)
-    if ret_1m is not None:
-        rc = "#4aba6e" if ret_1m > 0 else "#e84040"
-        data_rows += _kv("1M RTN", f"{ret_1m*100:+.1f}%", rc)
-    if ma200_pct is not None:
-        rc = "#4aba6e" if ma200_pct > 0 else "#e84040"
-        data_rows += _kv("VS 200D MA", f"{ma200_pct:+.1f}%", rc)
+    # ── Three key drivers (most readable, not all data) ───────────────────────
+    drivers = []
+    # Real yields — always show for most assets
     if r10 is not None:
         rc = "#e84040" if r10 > 1.5 else "#4aba6e" if r10 < 0.5 else "#f79400"
-        data_rows += _kv("REAL YIELD", f"{r10:.2f}%", rc)
+        ctx = "restrictive" if r10 > 1.5 else "accommodative" if r10 < 0.5 else "neutral"
+        drivers.append(("REAL YIELD", f"{r10:.2f}%", ctx.upper(), rc))
+    # HY OAS / credit
     if hy is not None:
-        rc = "#e84040" if hy > 4.5 else "#4aba6e"
-        data_rows += _kv("HY OAS", f"{hy:.2f}%", rc)
-    if c210 is not None:
-        rc = "#4aba6e" if c210 > 0.5 else "#e84040" if c210 < 0 else "#f79400"
-        data_rows += _kv("CURVE 2S10S", f"{c210:+.2f}pp", rc)
-    if wr is not None:
-        rc = "#4aba6e" if wr >= 0.58 else "#e84040" if wr < 0.45 else "#f79400"
-        data_rows += _kv(f"WIN RATE ({cur_label[:3].upper()})", f"{wr:.0%} · med {med:+.1f}%", rc)
+        rc = "#e84040" if hy > 4.5 else "#f79400" if hy > 3.5 else "#4aba6e"
+        ctx = "stress" if hy > 4.5 else "elevated" if hy > 3.5 else "contained"
+        drivers.append(("HY SPREADS", f"{hy:.2f}%", ctx.upper(), rc))
+    # Price vs 200d MA
+    if ma200_pct is not None:
+        rc = "#4aba6e" if ma200_pct > 0 else "#e84040"
+        ctx = "above 200d" if ma200_pct > 0 else "below 200d"
+        drivers.append(("TREND", f"{ma200_pct:+.1f}%", ctx.upper(), rc))
+    # Dollar for GLD/BTC/SLV
+    if ticker in ("GLD","IBIT","SLV") and dz is not None:
+        rc = "#4aba6e" if dz < -0.5 else "#e84040" if dz > 0.5 else "#f79400"
+        ctx = "weakening" if dz < -0.5 else "strengthening" if dz > 0.5 else "stable"
+        drivers.append(("DOLLAR", f"z {dz:+.2f}", ctx.upper(), rc))
+    # Fed BS for BTC
+    if ticker == "IBIT" and fed_r is not None:
+        rc = "#4aba6e" if fed_r > 0 else "#e84040"
+        ctx = "injecting" if fed_r > 0.5 else "draining" if fed_r < -0.5 else "flat"
+        drivers.append(("FED BS 13W", f"{fed_r:+.1f}%", ctx.upper(), rc))
+    drivers = drivers[:3]  # max 3 for readability
 
-    # Alignment bar
-    bar_pct = align_score
-    bar_col = align_color
+    drivers_html = ""
+    for d_label, d_val, d_ctx, d_color in drivers:
+        drivers_html += f"""
+    <div style="background:#111;border-radius:6px;padding:8px 10px;flex:1;min-width:0;">
+      <div style="font-size:7px;color:#555;letter-spacing:0.6px;margin-bottom:3px;">{d_label}</div>
+      <div style="font-size:13px;font-weight:900;color:{d_color};line-height:1;">{d_val}</div>
+      <div style="font-size:7px;color:{d_color};margin-top:2px;opacity:0.8;">{d_ctx}</div>
+    </div>"""
+
+    # ── Signal dots ───────────────────────────────────────────────────────────
+    dots_html = ""
+    for lbl, val, txt in signals:
+        dc = "#4aba6e" if val > 0 else "#e84040" if val < 0 else "#333"
+        short = lbl[:3].upper()
+        dots_html += (f"<div style='display:flex;flex-direction:column;"
+                      f"align-items:center;gap:3px;'>"
+                      f"<div style='width:8px;height:8px;border-radius:50%;"
+                      f"background:{dc};'></div>"
+                      f"<span style='font-size:6px;color:#555;'>{short}</span>"
+                      f"</div>")
+
+    # ── Falsification / watch level ───────────────────────────────────────────
+    falsif = ""
+    if ticker == "SPY":
+        if align_score < 50 and hy is not None:
+            falsif = f"Bull case needs: HY OAS < 3.5% + regime score > 55"
+        elif align_score >= 50:
+            falsif = f"Bear watch: HY OAS > 4.5% or real yields > 2.0%"
+    elif ticker == "QQQ":
+        falsif = f"Key: real yields direction — falling = tailwind, rising = headwind"
+    elif ticker == "GLD":
+        falsif = f"Bull case holds while real yields below 1.5% or dollar weak"
+    elif ticker == "IBIT":
+        falsif = f"Risk: dollar strength or credit stress (HY OAS > 4.5%) = BTC headwind"
+    elif ticker in ("SLV","XLU","XLC"):
+        falsif = f"Watch real yield trend — direction matters more than level"
+
+    # ── Regime bar ────────────────────────────────────────────────────────────
+    seg_labels = ["Risk Off","Bearish","Neutral","Bullish","Risk On"]
+    seg_colors_map = {"Risk Off":"#b42318","Bearish":"#d97706","Neutral":"#6b7280",
+                      "Bullish":"#16a34a","Risk On":"#1f7a4f"}
+    segs_html = ""
+    for lbl in seg_labels:
+        sc = seg_colors_map[lbl]
+        is_cur = (lbl == cur_label)
+        segs_html += (f"<div style='flex:1;display:flex;flex-direction:column;"
+                      f"align-items:center;gap:3px;'>"
+                      f"<div style='width:100%;height:5px;border-radius:2px;"
+                      f"background:{sc};opacity:{"1" if is_cur else "0.2"};'></div>"
+                      f"<span style='font-size:6px;color:{sc if is_cur else "#333"};"
+                      f"font-weight:{"800" if is_cur else "400"};'>"
+                      f"{lbl.split()[0].upper()}</span>"
+                      f"</div>")
 
     card_html = f"""
-<div style="background:#0d0d0d;border:1px solid #2a2a2a;border-radius:10px;
-     padding:16px 18px;font-family:'Courier New',monospace;
-     max-width:380px;box-shadow:0 4px 24px rgba(0,0,0,0.5);">
+<div style="background:#0a0a0a;border:1px solid #222;border-radius:12px;
+     padding:18px 20px;font-family:'Courier New',monospace;
+     max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,0.6);">
 
-  <!-- Header -->
-  <div style="display:flex;justify-content:space-between;align-items:center;
-              margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #1e1e1e;">
+  <!-- HEADER: ticker + date -->
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;
+              margin-bottom:10px;">
     <div>
-      <div style="font-size:11px;font-weight:900;color:#f0f0f0;
-                  letter-spacing:1.5px;">{ticker} &nbsp;·&nbsp; {meta['name'].upper()}</div>
-      <div style="font-size:8px;color:#555;margin-top:2px;letter-spacing:0.5px;">
-        MACRO ENGINE &nbsp;·&nbsp; {date.today().strftime("%b %d, %Y").upper()}
-      </div>
+      <span style="font-size:18px;font-weight:900;color:#f0f0f0;
+                   letter-spacing:2px;">{ticker}</span>
+      <span style="font-size:10px;color:#444;margin-left:8px;
+                   letter-spacing:1px;">{meta["name"].upper()}</span>
     </div>
-    <div style="text-align:right;">
-      <div style="font-size:10px;font-weight:800;color:{bar_col};">{verdict}</div>
-      <div style="font-size:8px;color:#555;margin-top:1px;">{verdict_detail}</div>
+    <div style="font-size:7px;color:#444;text-align:right;letter-spacing:0.5px;
+                padding-top:4px;">
+      MACRO ENGINE<br>{date.today().strftime("%b %d %Y").upper()}
     </div>
   </div>
 
-  <!-- Two columns: data + signals -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px;">
-    <div>{data_rows}</div>
+  <!-- HEADLINE VERDICT — the thing that makes people stop scrolling -->
+  <div style="background:#111;border-radius:8px;padding:12px 14px;
+              margin-bottom:12px;border-left:3px solid {verdict_color};">
+    <div style="font-size:15px;font-weight:900;color:{verdict_color};
+                letter-spacing:1.5px;margin-bottom:3px;">{verdict}</div>
+    <div style="font-size:8px;color:#666;letter-spacing:0.3px;">{tagline}</div>
+  </div>
+
+  <!-- WIN RATE — the stat that grabs attention -->
+  <div style="display:flex;align-items:center;gap:12px;
+              margin-bottom:12px;padding-bottom:12px;
+              border-bottom:1px solid #1a1a1a;">
     <div>
-      <div style="font-size:8px;color:#555;letter-spacing:0.5px;
-                  margin-bottom:5px;">SIGNAL BREAKDOWN</div>
-      {sig_rows_html}
+      <div style="font-size:22px;font-weight:900;color:{wr_color};
+                  letter-spacing:1px;line-height:1;">{wr_str}</div>
+      <div style="font-size:8px;color:#555;margin-top:2px;">{wr_sub}</div>
+    </div>
+    {"" if price is None else f'<div style="margin-left:auto;text-align:right;"><div style="font-size:13px;font-weight:900;color:#f0f0f0;">${price:,.2f}</div><div style="font-size:8px;color:{("#4aba6e" if ret_1w and ret_1w>0 else "#e84040") if ret_1w is not None else "#555"};">{f"{ret_1w*100:+.1f}% 1W" if ret_1w is not None else ""}</div></div>'}
+  </div>
+
+  <!-- KEY DRIVERS — 3 boxes -->
+  <div style="display:flex;gap:6px;margin-bottom:12px;">
+    {drivers_html}
+  </div>
+
+  <!-- SIGNAL DOTS — compact visual -->
+  <div style="margin-bottom:12px;">
+    <div style="font-size:7px;color:#444;letter-spacing:0.6px;
+                margin-bottom:6px;">SIGNAL BREAKDOWN</div>
+    <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;">
+      {dots_html}
     </div>
   </div>
 
-  <!-- Regime bar -->
-  <div style="margin-bottom:8px;">
-    <div style="font-size:8px;color:#555;letter-spacing:0.5px;margin-bottom:4px;">
-      REGIME &nbsp;·&nbsp; {cur_label.upper()} &nbsp;·&nbsp; {cur_score}/100
-    </div>
-    <div style="display:flex;gap:2px;">{segs_html}</div>
+  <!-- REGIME POSITION -->
+  <div style="margin-bottom:12px;">
+    <div style="display:flex;gap:4px;">{segs_html}</div>
   </div>
 
-  <!-- Alignment bar -->
-  <div>
-    <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
-      <span style="font-size:8px;color:#555;">MACRO ALIGNMENT</span>
-      <span style="font-size:8px;font-weight:700;color:{bar_col};">{align_score}/100</span>
-    </div>
-    <div style="background:#1a1a1a;border-radius:3px;height:4px;overflow:hidden;">
-      <div style="width:{bar_pct}%;background:{bar_col};height:100%;border-radius:3px;"></div>
-    </div>
-  </div>
+  {"" if not falsif else f'<div style="font-size:8px;color:#555;border-top:1px solid #1a1a1a;padding-top:8px;margin-bottom:8px;font-style:italic;">{falsif}</div>'}
 
-  <!-- Footer -->
-  <div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e1e1e;
-              font-size:7px;color:#333;letter-spacing:0.4px;">
+  <!-- FOOTER -->
+  <div style="font-size:7px;color:#2a2a2a;letter-spacing:0.4px;">
     macroengine.io &nbsp;·&nbsp; not financial advice &nbsp;·&nbsp;
-    {n_total} signals scored
+    {n_tot} signals · {n_pos} confirm · {n_neg} against
   </div>
 </div>"""
     return card_html
