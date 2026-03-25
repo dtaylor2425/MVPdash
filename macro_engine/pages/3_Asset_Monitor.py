@@ -490,19 +490,16 @@ def build_macro_card(ticker, align_score, align_color, summary,
         "MACRO ENGINE<br>" + today_str + "</div>"
         "</div>"
 
-        # Verdict bar
-        "<div style='background:#111;border-radius:8px;padding:10px 14px;"
+        # Price bar (was verdict bar — verdict now lives in score block)
+        "<div style='background:#111;border-radius:8px;padding:8px 14px;"
         "margin-bottom:10px;border-left:3px solid " + vc + ";'>"
-        "<div style='display:flex;justify-content:space-between;"
-        "align-items:center;'>"
-        "<div style='font-size:13px;font-weight:900;color:" + vc + ";"
-        "letter-spacing:1.2px;'>" + verdict + "</div>"
+        "<div style='display:flex;justify-content:space-between;align-items:center;'>"
+        "<div style='font-size:8px;color:#666;'>" + meta["name"].upper() + " &nbsp;·&nbsp; " + today_str + "</div>"
         + price_block +
         "</div>"
-        "<div style='font-size:8px;color:#666;margin-top:3px;'>" + tagline + "</div>"
         "</div>"
 
-        # Alignment score block (replaces win rate)
+        # Alignment score block
         "<div style='margin-bottom:10px;padding-bottom:10px;"
         "border-bottom:1px solid #1a1a1a;display:flex;"
         "justify-content:space-between;align-items:center;'>"
@@ -514,10 +511,9 @@ def build_macro_card(ticker, align_score, align_color, summary,
         "<div style='font-size:8px;color:#555;margin-top:3px;'>MACRO ALIGNMENT SCORE</div>"
         "</div>"
         "<div style='text-align:right;'>"
-        "<div style='font-size:10px;font-weight:800;color:" + align_color + ";"
-        "letter-spacing:0.8px;'>" + verdict + "</div>"
+        "<div style='font-size:12px;font-weight:900;color:" + vc + ";"
+        "letter-spacing:1px;'>" + verdict + "</div>"
         "<div style='font-size:8px;color:#555;margin-top:2px;'>" + tagline + "</div>"
-        "</div>"
         "</div>"
         "</div>"
 
