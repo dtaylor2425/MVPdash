@@ -272,93 +272,195 @@ def macro_alignment(ticker, regime, macro, px):
                 else:           signals.append(("SLV/GLD ratio",  0, f"Silver/gold ratio normal"))
 
     # Compute alignment score from signals
+    # Score represents the net directional balance of macro signals for this asset.
+    # Floor at 15, ceiling at 85 — a score of 0 or 100 implies perfect certainty
+    # which the model never has. Real range in practice: ~20-80.
     n    = len(signals)
     pos  = sum(1 for _,v,_ in signals if v > 0)
     neg  = sum(1 for _,v,_ in signals if v < 0)
+    neu  = sum(1 for _,v,_ in signals if v == 0)
     raw  = (pos - neg) / n if n > 0 else 0
-    score_out = int(50 + raw * 50)
+    # Apply floor/ceiling: max bearish = 15, max bullish = 85
+    score_out = int(max(15, min(85, 50 + raw * 35)))
 
-    if score_out >= 70:   color_out = "#1f7a4f"; summary = "BULLISH — macro aligned"
-    elif score_out >= 55: color_out = "#16a34a"; summary = "MILD TAILWIND"
-    elif score_out >= 45: color_out = "#6b7280"; summary = "NEUTRAL — mixed signals"
-    elif score_out >= 30: color_out = "#d97706"; summary = "MILD HEADWIND"
-    else:                 color_out = "#b42318"; summary = "BEARISH — macro against"
+    # Labels reflect the balance, not binary good/bad
+    n_confirm = pos; n_contra = neg
+    if score_out >= 68:   color_out = "#1f7a4f"; summary = f"BULLISH · {n_confirm}/{n} signals confirm"
+    elif score_out >= 55: color_out = "#16a34a"; summary = f"TAILWIND · {n_confirm}/{n} signals confirm"
+    elif score_out >= 45: color_out = "#6b7280"; summary = f"NEUTRAL · signals split {n_confirm}✓ {n_contra}✗"
+    elif score_out >= 33: color_out = "#d97706"; summary = f"HEADWIND · {n_contra}/{n} signals against"
+    else:                 color_out = "#b42318"; summary = f"BEARISH · {n_contra}/{n} signals against"
 
     return score_out, signals, summary, color_out
 
-# ── Content generator ─────────────────────────────────────────────────────────
+def build_macro_card(ticker, align_score, align_color, summary,
+                     signals, regime_rets, macro, px):
+    """
+    Build a visual HTML macro snapshot card — designed to be screenshotted
+    and attached to X/Substack comments. Bloomberg-terminal aesthetic.
+    Returns raw HTML string.
+    """
+    meta = WATCH[ticker]
+    r10  = _last(macro["real10"].dropna()) if "real10" in macro.columns else None
+    hy   = _last(macro["hy_oas"].dropna())  if "hy_oas"  in macro.columns else None
+    dz   = _zscore(macro["dollar_broad"])   if "dollar_broad" in macro.columns else None
+    c210 = None
+    if "y10" in macro.columns and "y2" in macro.columns:
+        c210 = _last((macro["y10"]-macro["y2"]).dropna())
 
-def generate_comment(ticker, alignment_score, signals, regime_rets, macro, px):
-    """Build a ready-to-post comment for this asset."""
-    meta    = WATCH[ticker]
-    name    = meta["name"]
-    color   = meta["color"]
-    r10     = _last(macro["real10"].dropna()) if "real10" in macro.columns else None
-    dz      = _zscore(macro["dollar_broad"]) if "dollar_broad" in macro.columns else None
-    hy      = _last(macro["hy_oas"].dropna()) if "hy_oas" in macro.columns else None
-
-    # Price stats
-    price = None; ret_1w = None; ret_1m = None; ma50_pct = None; ma200_pct = None
+    price = ma200_pct = ret_1w = ret_1m = None
     if ticker in px.columns:
-        s     = px[ticker].dropna()
-        price = _last(s)
-        ret_1w = _ret(s, 7);  ret_1m = _ret(s, 30)
-        ma50  = _ma(s, 50);   ma200 = _ma(s, 200)
-        if price and not ma50.dropna().empty:
-            ma50_pct  = (price / float(ma50.dropna().iloc[-1]) - 1)*100
+        s = px[ticker].dropna()
+        price  = _last(s)
+        ret_1w = _ret(s, 7); ret_1m = _ret(s, 30)
+        ma200  = _ma(s, 200)
         if price and not ma200.dropna().empty:
             ma200_pct = (price / float(ma200.dropna().iloc[-1]) - 1)*100
 
-    # Historical win rate in current regime
     cur_rets = regime_rets.get(cur_label, [])
-    wr = (sum(1 for r in cur_rets if r > 0)/len(cur_rets)) if len(cur_rets) >= 8 else None
-    p50 = float(np.median(cur_rets))*100 if cur_rets else None
+    wr  = (sum(1 for r in cur_rets if r > 0)/len(cur_rets)) if len(cur_rets) >= 8 else None
+    med = float(np.median(cur_rets))*100 if cur_rets else None
 
-    # Top 2 confirming and top 1 contradicting signal
-    pos_sigs = [(l,t) for l,v,t in signals if v > 0][:2]
-    neg_sigs = [(l,t) for l,v,t in signals if v < 0][:1]
+    pos_sigs = [(l,t) for l,v,t in signals if v > 0]
+    neg_sigs = [(l,t) for l,v,t in signals if v < 0]
 
-    lines = []
-
-    # Line 1: price + trend context
-    if price and ma200_pct is not None:
-        trend = "above" if ma200_pct > 0 else "below"
-        lines.append(f"${ticker} at ${price:.2f}, {ma200_pct:+.1f}% {trend} its 200d MA.")
-    elif price:
-        lines.append(f"${ticker} at ${price:.2f}.")
-
-    # Line 2: macro regime read
-    if alignment_score >= 60:
-        lines.append(f"Macro setup is supportive — {cur_label} regime (score {cur_score}/100).")
-    elif alignment_score <= 40:
-        lines.append(f"Macro is working against this trade — {cur_label} regime (score {cur_score}/100).")
+    # Verdict text
+    n_conf = len(pos_sigs); n_against = len(neg_sigs); n_total = len(signals)
+    if align_score >= 60:
+        verdict = f"MACRO TAILWIND"
+        verdict_detail = f"{n_conf} of {n_total} signals confirm this trade"
+    elif align_score <= 40:
+        verdict = f"MACRO HEADWIND"
+        verdict_detail = f"{n_against} of {n_total} signals working against"
     else:
-        lines.append(f"Mixed macro backdrop — {cur_label} regime (score {cur_score}/100), signals split.")
+        verdict = "MIXED SIGNALS"
+        verdict_detail = f"{n_conf} confirm · {n_against} against · {n_total-n_conf-n_against} neutral"
 
-    # Line 3: asset-specific driver
-    if ticker == "QQQ" and r10 is not None:
-        lines.append(f"Real yields at {r10:.2f}% — {'restrictive territory, QQQ duration premium compresses' if r10 > 1.5 else 'supportive for long-duration growth' if r10 < 0.5 else 'watch real yield direction for the next QQQ leg'}.")
-    elif ticker == "GLD" and r10 is not None:
-        dol_str = f" Dollar z {dz:+.2f} adds {'tailwind' if dz < 0 else 'headwind'}." if dz else ""
-        lines.append(f"Real yields {r10:.2f}% ({'headwind' if r10 > 1.0 else 'tailwind'} for GLD).{dol_str}")
-    elif ticker == "IBIT":
-        lines.append(f"BTC macro signal: dollar {'weakening' if dz and dz<0 else 'strengthening' if dz and dz>0 else 'neutral'}, "
-                     f"credit {'stressed' if hy and hy > 4.5 else 'contained'}.")
-    elif ticker == "SLV" and r10 is not None:
-        lines.append(f"Silver gets the gold setup (real yields {r10:.2f}%) plus an industrial demand overlay from the curve.")
-    elif ticker == "SPY" and hy is not None:
-        lines.append(f"HY OAS at {hy:.2f}% — {'spreads contained, credit supportive' if hy < 3.5 else 'spreads elevated, watch credit for early warning'}.")
+    # Regime bar segments (5 buckets)
+    seg_labels = ["Risk Off","Bearish","Neutral","Bullish","Risk On"]
+    seg_colors = {"Risk Off":"#b42318","Bearish":"#d97706","Neutral":"#6b7280",
+                  "Bullish":"#16a34a","Risk On":"#1f7a4f"}
+    segs_html = ""
+    for lbl in seg_labels:
+        is_cur = (lbl == cur_label)
+        sc = seg_colors[lbl]
+        segs_html += (f"<div style='flex:1;height:6px;border-radius:2px;"
+                      f"background:{sc};opacity:{'1' if is_cur else '0.25'};"
+                      f"margin:0 1px;'></div>")
 
-    # Line 4: historical win rate
+    # Top signals rows
+    sig_rows_html = ""
+    for lbl, text in (pos_sigs + neg_sigs)[:4]:
+        is_pos = any(lbl == l and v > 0 for l,v,t in signals)
+        sc = "#4aba6e" if is_pos else "#e84040"
+        icon = "▲" if is_pos else "▼"
+        sig_rows_html += (
+            f"<div style='display:flex;justify-content:space-between;"
+            f"align-items:center;padding:4px 0;border-bottom:1px solid #1e1e1e;'>"
+            f"<span style='font-size:9px;color:#888;font-family:Courier New,monospace;'>"
+            f"{lbl.upper()}</span>"
+            f"<span style='font-size:9px;font-weight:700;color:{sc};"
+            f"font-family:Courier New,monospace;'>{icon}</span>"
+            f"</div>")
+
+    # Key data rows
+    def _kv(label, value, color="#c8c8c8"):
+        return (f"<div style='display:flex;justify-content:space-between;"
+                f"padding:3px 0;border-bottom:1px solid #1a1a1a;'>"
+                f"<span style='font-size:9px;color:#666;font-family:Courier New,monospace;'>"
+                f"{label}</span>"
+                f"<span style='font-size:9px;font-weight:700;color:{color};"
+                f"font-family:Courier New,monospace;'>{value}</span>"
+                f"</div>")
+
+    data_rows = ""
+    if price:
+        rc = "#4aba6e" if ret_1w and ret_1w > 0 else "#e84040"
+        data_rows += _kv("PRICE", f"${price:,.2f}", "#f0f0f0")
+    if ret_1w is not None:
+        rc = "#4aba6e" if ret_1w > 0 else "#e84040"
+        data_rows += _kv("1W RTN", f"{ret_1w*100:+.1f}%", rc)
+    if ret_1m is not None:
+        rc = "#4aba6e" if ret_1m > 0 else "#e84040"
+        data_rows += _kv("1M RTN", f"{ret_1m*100:+.1f}%", rc)
+    if ma200_pct is not None:
+        rc = "#4aba6e" if ma200_pct > 0 else "#e84040"
+        data_rows += _kv("VS 200D MA", f"{ma200_pct:+.1f}%", rc)
+    if r10 is not None:
+        rc = "#e84040" if r10 > 1.5 else "#4aba6e" if r10 < 0.5 else "#f79400"
+        data_rows += _kv("REAL YIELD", f"{r10:.2f}%", rc)
+    if hy is not None:
+        rc = "#e84040" if hy > 4.5 else "#4aba6e"
+        data_rows += _kv("HY OAS", f"{hy:.2f}%", rc)
+    if c210 is not None:
+        rc = "#4aba6e" if c210 > 0.5 else "#e84040" if c210 < 0 else "#f79400"
+        data_rows += _kv("CURVE 2S10S", f"{c210:+.2f}pp", rc)
     if wr is not None:
-        lines.append(f"In {cur_label} regimes historically, {ticker} posts a positive 4-week return {wr:.0%} of the time "
-                     f"(median {p50:+.1f}%, n={len(cur_rets)} weeks).")
+        rc = "#4aba6e" if wr >= 0.58 else "#e84040" if wr < 0.45 else "#f79400"
+        data_rows += _kv(f"WIN RATE ({cur_label[:3].upper()})", f"{wr:.0%} · med {med:+.1f}%", rc)
 
-    # Line 5: falsification
-    if neg_sigs:
-        lines.append(f"Key risk: {neg_sigs[0][1].lower()}")
+    # Alignment bar
+    bar_pct = align_score
+    bar_col = align_color
 
-    return "\n\n".join(lines)
+    card_html = f"""
+<div style="background:#0d0d0d;border:1px solid #2a2a2a;border-radius:10px;
+     padding:16px 18px;font-family:'Courier New',monospace;
+     max-width:380px;box-shadow:0 4px 24px rgba(0,0,0,0.5);">
+
+  <!-- Header -->
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #1e1e1e;">
+    <div>
+      <div style="font-size:11px;font-weight:900;color:#f0f0f0;
+                  letter-spacing:1.5px;">{ticker} &nbsp;·&nbsp; {meta['name'].upper()}</div>
+      <div style="font-size:8px;color:#555;margin-top:2px;letter-spacing:0.5px;">
+        MACRO ENGINE &nbsp;·&nbsp; {date.today().strftime("%b %d, %Y").upper()}
+      </div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:10px;font-weight:800;color:{bar_col};">{verdict}</div>
+      <div style="font-size:8px;color:#555;margin-top:1px;">{verdict_detail}</div>
+    </div>
+  </div>
+
+  <!-- Two columns: data + signals -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px;">
+    <div>{data_rows}</div>
+    <div>
+      <div style="font-size:8px;color:#555;letter-spacing:0.5px;
+                  margin-bottom:5px;">SIGNAL BREAKDOWN</div>
+      {sig_rows_html}
+    </div>
+  </div>
+
+  <!-- Regime bar -->
+  <div style="margin-bottom:8px;">
+    <div style="font-size:8px;color:#555;letter-spacing:0.5px;margin-bottom:4px;">
+      REGIME &nbsp;·&nbsp; {cur_label.upper()} &nbsp;·&nbsp; {cur_score}/100
+    </div>
+    <div style="display:flex;gap:2px;">{segs_html}</div>
+  </div>
+
+  <!-- Alignment bar -->
+  <div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
+      <span style="font-size:8px;color:#555;">MACRO ALIGNMENT</span>
+      <span style="font-size:8px;font-weight:700;color:{bar_col};">{align_score}/100</span>
+    </div>
+    <div style="background:#1a1a1a;border-radius:3px;height:4px;overflow:hidden;">
+      <div style="width:{bar_pct}%;background:{bar_col};height:100%;border-radius:3px;"></div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e1e1e;
+              font-size:7px;color:#333;letter-spacing:0.4px;">
+    macroengine.io &nbsp;·&nbsp; not financial advice &nbsp;·&nbsp;
+    {n_total} signals scored
+  </div>
+</div>"""
+    return card_html
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TOPBAR
@@ -611,45 +713,29 @@ for tab, ticker in zip(tabs, ALL_T):
 
         with content_col:
             with st.container(border=True):
-                st.markdown("<div class='me-rowtitle'>📋 Content generator</div>",
+                st.markdown("<div class='me-rowtitle'>📸 Macro snapshot card</div>",
                             unsafe_allow_html=True)
-                st.caption(f"One-click macro-backed comment for {ticker} posts.")
+                st.caption("Screenshot this card and attach it to your comment. "
+                           "Tap the ↻ button to refresh after market moves.")
 
-                comment = generate_comment(ticker, align, signals, reg_rets, macro, px)
+                card_html = build_macro_card(
+                    ticker, align, align_color, summary,
+                    signals, reg_rets, macro, px)
 
-                # Style toggle
-                style = st.radio("Style", ["Thread reply","Standalone post","Quick take"],
-                                 horizontal=True, key=f"style_{ticker}")
+                st.markdown(card_html, unsafe_allow_html=True)
 
-                if style == "Quick take":
-                    # Compress to 2 sentences
-                    lines = comment.split("\n\n")
-                    comment_out = " ".join(lines[:2])
-                elif style == "Thread reply":
-                    comment_out = comment
-                else:
-                    # Add header
-                    comment_out = f"Macro read on ${ticker}:\n\n{comment}"
-
-                st.text_area(
-                    "Copy and paste:",
-                    value=comment_out,
-                    height=220,
-                    key=f"content_{ticker}",
-                    label_visibility="collapsed",
-                )
-
-                char_count = len(comment_out)
-                x_ok = char_count <= 280
-                st.markdown(
-                    f"<div style='font-size:10px;color:{'#1f7a4f' if x_ok else '#d97706'};'>"
-                    f"{char_count} chars "
-                    f"{'· fits in one X post ✓' if x_ok else f'· too long for X ({char_count-280} over)'}"
-                    f"</div>",
-                    unsafe_allow_html=True)
-
-                if st.button(f"↻ Refresh content", key=f"refresh_{ticker}", use_container_width=False):
-                    st.rerun()
+                st.markdown("")
+                c1, c2 = st.columns(2, gap="small")
+                with c1:
+                    if st.button("↻ Refresh", key=f"refresh_{ticker}",
+                                 width="stretch"):
+                        st.rerun()
+                with c2:
+                    st.markdown(
+                        f"<div style='font-size:10px;color:rgba(0,0,0,0.45);"
+                        f"padding:6px 0;'>"
+                        f"Right-click → Save image, or screenshot the card above"
+                        f"</div>", unsafe_allow_html=True)
 
         st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
 
