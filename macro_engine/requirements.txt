@@ -1,9 +1,0 @@
-streamlit
-pandas
-numpy
-yfinance
-fredapi
-pyarrow
-plotly
-spicy
-anthropic
