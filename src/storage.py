@@ -1,16 +1,22 @@
 from pathlib import Path
 import pandas as pd
 
-def cache_path(cache_dir: str, name: str) -> Path:
+
+def _path(cache_dir: str, name: str) -> Path:
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
     return Path(cache_dir) / f"{name}.parquet"
 
+# Public alias used by get_fred_cached for age checks
+_parquet_path = _path
+
+
 def write_parquet(df: pd.DataFrame, cache_dir: str, name: str) -> None:
-    p = cache_path(cache_dir, name)
-    df.to_parquet(p, index=True)
+    _path(cache_dir, name).parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(_path(cache_dir, name), index=True)
+
 
 def read_parquet(cache_dir: str, name: str) -> pd.DataFrame | None:
-    p = cache_path(cache_dir, name)
+    p = _path(cache_dir, name)
     if not p.exists():
         return None
     return pd.read_parquet(p)
