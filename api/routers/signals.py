@@ -1,6 +1,6 @@
 """
 api/routers/signals.py
-GET /api/signals  — live FRED + price signal values for the ticker tape
+GET /api/signals  — live FRED + price signal values for the ticker tape and dashboard
 """
 
 from fastapi import APIRouter, HTTPException
@@ -47,13 +47,6 @@ def _safe(v):
 
 @router.get("/signals")
 def signals_endpoint():
-    """
-    Returns all live macro signal values.
-    Used by: ticker tape, signal cards, live badges.
-
-    Response shape — flat dict of named signals, each with:
-    { value, formatted, zscore, delta_7d, color, label, direction }
-    """
     try:
         macro = get_macro()
         px    = get_prices()
@@ -69,7 +62,7 @@ def signals_endpoint():
             "delta":     _safe(delta),
             "color":     color,
             "label":     label,
-            "direction": direction,   # +1 bullish, -1 bearish, 0 neutral
+            "direction": direction,
         }
 
     out = {}
@@ -108,6 +101,16 @@ def signals_endpoint():
                                   delta=c_d7, color=c_color, label="Curve 2s10s",
                                   direction=1 if (c_now or 0) > 0.5 else -1 if (c_now or 0) < 0 else 0)
 
+    # ── Curve 3m10y ──────────────────────────────────────────────────────────
+    y3m = _col(macro, "y3m")
+    if not y10.empty and not y3m.empty:
+        curve3m = (y10 - y3m).dropna()
+        c3_now = _last(curve3m)
+        c3_color = "#22c55e" if (c3_now or 0) > 0.5 else "#ef4444" if (c3_now or 0) < 0 else "#f59e0b"
+        out["curve_3m10"] = sig(c3_now, f"{c3_now:+.2f}pp" if c3_now is not None else "—",
+                                color=c3_color, label="Curve 3m10y",
+                                direction=1 if (c3_now or 0) > 0 else -1)
+
     # ── Breakeven 10y ────────────────────────────────────────────────────────
     r10_s = _col(macro, "real10")
     if not y10.empty and not r10_s.empty:
@@ -117,16 +120,42 @@ def signals_endpoint():
         out["breakeven_10y"] = sig(be_now, f"{be_now:.2f}%" if be_now else "—",
                                     color=be_color, label="Breakeven 10y", direction=0)
 
+    # ── Breakeven 5y ─────────────────────────────────────────────────────────
+    y5 = _col(macro, "y5"); r5 = _col(macro, "real5")
+    if not y5.empty and not r5.empty:
+        be5 = (y5 - r5).dropna()
+        be5_now = _last(be5)
+        be5_color = "#f59e0b" if (be5_now or 2) > 2.5 else "#22c55e" if (be5_now or 2) < 2.0 else "#94a3b8"
+        out["breakeven_5y"] = sig(be5_now, f"{be5_now:.2f}%" if be5_now else "—",
+                                   color=be5_color, label="Breakeven 5y", direction=0)
+
     # ── Initial claims ───────────────────────────────────────────────────────
     cl = _col(macro, "init_claims")
     cl_now = _last(cl); cl_z = _zscore(cl, w=min(252, len(cl))) if not cl.empty else None
     cl_4w = _delta(cl, 28)
-    cl_color = "#ef4444" if (cl_z or 0) > 0.5 else "#22c55e" if (cl_z or 0) < -0.5 else "#94a3b8"
+    cl_color = "#ef4444" if (cl_now or 0) > 270000 else "#f59e0b" if (cl_now or 0) > 225000 else "#22c55e"
     out["init_claims"] = sig(cl_now,
                               f"{cl_now/1e3:.0f}k" if cl_now else "—",
                               zscore=cl_z, delta=cl_4w, color=cl_color,
                               label="Initial claims",
-                              direction=-1 if (cl_z or 0) > 0.5 else 1 if (cl_z or 0) < -0.5 else 0)
+                              direction=-1 if (cl_now or 0) > 270000 else 1 if (cl_now or 0) < 225000 else 0)
+
+    # ── Continuing claims ────────────────────────────────────────────────────
+    cc = _col(macro, "cont_claims")
+    cc_now = _last(cc); cc_z = _zscore(cc, w=min(252, len(cc))) if not cc.empty else None
+    cc_color = "#ef4444" if (cc_now or 0) > 2000000 else "#22c55e" if (cc_now or 0) < 1700000 else "#f59e0b"
+    out["cont_claims"] = sig(cc_now,
+                              f"{cc_now/1e6:.2f}M" if cc_now else "—",
+                              zscore=cc_z, color=cc_color, label="Continuing claims",
+                              direction=-1 if (cc_now or 0) > 2000000 else 1 if (cc_now or 0) < 1700000 else 0)
+
+    # ── Fed funds rate ───────────────────────────────────────────────────────
+    ff = _col(macro, "fed_funds")
+    ff_now = _last(ff)
+    ff_color = "#ef4444" if (ff_now or 0) > 5.0 else "#f59e0b" if (ff_now or 0) > 3.0 else "#22c55e"
+    out["fed_funds"] = sig(ff_now, f"{ff_now:.2f}%" if ff_now else "—",
+                           color=ff_color, label="Fed funds",
+                           direction=-1 if (ff_now or 0) > 5.0 else 0)
 
     # ── Dollar ───────────────────────────────────────────────────────────────
     dol = _col(macro, "dollar_broad")
@@ -135,6 +164,23 @@ def signals_endpoint():
     out["dollar"] = sig(dol_now, f"{dol_now:.1f}" if dol_now else "—",
                         zscore=dol_z, color=dol_color, label="Dollar (broad)",
                         direction=-1 if (dol_z or 0) > 0.5 else 1 if (dol_z or 0) < -0.5 else 0)
+
+    # ── NFCI ─────────────────────────────────────────────────────────────────
+    nfci = _col(macro, "nfci")
+    nfci_now = _last(nfci)
+    # NFCI: negative = loose, positive = tight
+    nfci_color = "#ef4444" if (nfci_now or 0) > 0 else "#22c55e"
+    out["nfci"] = sig(nfci_now, f"{nfci_now:.2f}" if nfci_now else "—",
+                      color=nfci_color, label="NFCI",
+                      direction=-1 if (nfci_now or 0) > 0 else 1)
+
+    # ── U Michigan Sentiment ─────────────────────────────────────────────────
+    um = _col(macro, "umich")
+    um_now = _last(um); um_z = _zscore(um)
+    um_color = "#22c55e" if (um_z or 0) > 0.3 else "#ef4444" if (um_z or 0) < -0.5 else "#94a3b8"
+    out["umich"] = sig(um_now, f"{um_now:.1f}" if um_now else "—",
+                       zscore=um_z, color=um_color, label="Consumer sentiment",
+                       direction=1 if (um_z or 0) > 0.3 else -1 if (um_z or 0) < -0.5 else 0)
 
     # ── VIX ──────────────────────────────────────────────────────────────────
     vix_t = "^VIX"
@@ -156,6 +202,16 @@ def signals_endpoint():
                 vr_color = "#ef4444" if vr > 1.0 else "#22c55e"
                 out["vratio"] = sig(vr, f"{vr:.3f}", color=vr_color,
                                     label="V-Ratio", direction=-1 if vr > 1.0 else 1)
+
+    # ── MOVE Index ───────────────────────────────────────────────────────────
+    move_t = "^MOVE"
+    if move_t in px.columns:
+        move_s = px[move_t].dropna()
+        move_now = _last(move_s)
+        move_color = "#ef4444" if (move_now or 0) > 120 else "#f59e0b" if (move_now or 0) > 100 else "#22c55e"
+        out["move"] = sig(move_now, f"{move_now:.1f}" if move_now else "—",
+                          color=move_color, label="MOVE",
+                          direction=-1 if (move_now or 0) > 120 else 0)
 
     # ── RSP/SPY breadth ──────────────────────────────────────────────────────
     if "RSP" in px.columns and "SPY" in px.columns:

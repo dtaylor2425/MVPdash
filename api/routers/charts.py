@@ -3,10 +3,8 @@ api/routers/charts.py
 GET /api/charts/{series}  — time series data for a named signal
 GET /api/charts/price/{ticker} — OHLC/close for an ETF
 
-Supported series names:
-  hy_oas, ig_oas, real10, curve_2s10s, curve_3m10,
-  breakeven, dollar, fed_assets, init_claims, cont_claims,
-  cpi_yoy, vratio, rsp_spy
+Supports raw FRED series, derived/computed series (from src/derived.py),
+and yfinance proxy passthroughs.
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -18,7 +16,6 @@ from api.deps import get_macro, get_prices
 
 router = APIRouter(tags=["Charts"])
 
-# Lookback options in trading days
 RANGES = {"1m": 21, "3m": 63, "6m": 126, "1y": 252, "2y": 504, "5y": 1260}
 
 
@@ -28,7 +25,6 @@ def _slice(s: pd.Series, rng: str) -> pd.Series:
 
 
 def _to_points(s: pd.Series) -> list:
-    """Convert series to [{date, value}] list, dropping NaN."""
     return [
         {"date": str(idx.date()), "value": round(float(v), 5)}
         for idx, v in s.items()
@@ -36,80 +32,108 @@ def _to_points(s: pd.Series) -> list:
     ]
 
 
+# ── Inline series (fast, no import overhead) ─────────────────────────────────
+def _build_inline_map(macro, px):
+    """Series that are simple column lookups or one-line computations."""
+    def _col(name):
+        return macro[name].dropna() if name in macro.columns else pd.Series(dtype=float)
+
+    y10 = _col("y10"); y2 = _col("y2"); y3m = _col("y3m")
+    y5 = _col("y5"); y30 = _col("y30")
+    r10 = _col("real10"); r5 = _col("real5")
+    vix_t = "^VIX"; vix3m_t = "^VIX3M"
+
+    return {
+        # Raw FRED columns
+        "hy_oas":       lambda: _col("hy_oas"),
+        "ig_oas":       lambda: _col("ig_oas"),
+        "real10":       lambda: r10,
+        "real5":        lambda: r5,
+        "y10":          lambda: y10,
+        "y2":           lambda: y2,
+        "y5":           lambda: y5,
+        "y30":          lambda: y30,
+        "dollar":       lambda: _col("dollar_broad"),
+        "fed_assets":   lambda: _col("fed_assets"),
+        "init_claims":  lambda: _col("init_claims"),
+        "cont_claims":  lambda: _col("cont_claims"),
+        "fed_funds":    lambda: _col("fed_funds"),
+        "nfci":         lambda: _col("nfci"),
+        "umich":        lambda: _col("umich"),
+        "rrp":          lambda: _col("rrp"),
+        "tga":          lambda: _col("tga"),
+
+        # Simple derived (kept inline for speed)
+        "curve_2s10s":  lambda: (y10 - y2).dropna(),
+        "curve_3m10":   lambda: (y10 - y3m).dropna(),
+        "cpi_yoy":      lambda: (_col("cpi").pct_change(12) * 100).dropna() if "cpi" in macro.columns else pd.Series(dtype=float),
+
+        # Proxy passthroughs
+        "spy":          lambda: px["SPY"].dropna() if "SPY" in px.columns else pd.Series(dtype=float),
+        "gld":          lambda: px["GLD"].dropna() if "GLD" in px.columns else pd.Series(dtype=float),
+    }
+
+
 @router.get("/charts/{series}")
 def chart_series(
     series: str,
     range: str = Query("1y", description="1m | 3m | 6m | 1y | 2y | 5y"),
 ):
-    """
-    Returns time-series data for a named macro signal.
-    Used by all chart pages on the frontend.
-    """
     try:
         macro = get_macro()
         px    = get_prices()
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    # ── Derived series ────────────────────────────────────────────────────────
-    def _col(name): return macro[name].dropna() if name in macro.columns else pd.Series(dtype=float)
+    inline_map = _build_inline_map(macro, px)
+    s = None
 
-    y10  = _col("y10"); y2  = _col("y2"); y3m = _col("y3m")
-    r10  = _col("real10")
-    vix_t = "^VIX"; vix3m_t = "^VIX3M"
+    # 1. Check inline map first (fastest)
+    if series in inline_map:
+        try:
+            s = inline_map[series]()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
-    series_map = {
-        "hy_oas":       lambda: _col("hy_oas"),
-        "ig_oas":       lambda: _col("ig_oas"),
-        "real10":       lambda: r10,
-        "curve_2s10s":  lambda: (y10 - y2).dropna(),
-        "curve_3m10":   lambda: (y10 - y3m).dropna(),
-        "breakeven":    lambda: (y10 - r10).dropna(),
-        "dollar":       lambda: _col("dollar_broad"),
-        "fed_assets":   lambda: _col("fed_assets"),
-        "init_claims":  lambda: _col("init_claims"),
-        "cont_claims":  lambda: _col("cont_claims"),
-        "cpi_yoy":      lambda: (_col("cpi").pct_change(12) * 100).dropna() if "cpi" in macro.columns else pd.Series(dtype=float),
-        "rsp_spy":      lambda: (px["RSP"] / px["SPY"].reindex(px["RSP"].index, method="ffill")).dropna()
-                                if "RSP" in px.columns and "SPY" in px.columns else pd.Series(dtype=float),
-        "vratio":       lambda: (px[vix_t] / px[vix3m_t].reindex(px[vix_t].index, method="ffill")).dropna()
-                                if vix_t in px.columns and vix3m_t in px.columns else pd.Series(dtype=float),
-        "vix":          lambda: px[vix_t].dropna() if vix_t in px.columns else pd.Series(dtype=float),
-        "spy":          lambda: px["SPY"].dropna() if "SPY" in px.columns else pd.Series(dtype=float),
-        "gld":          lambda: px["GLD"].dropna() if "GLD" in px.columns else pd.Series(dtype=float),
-        "tlt":          lambda: px["TLT"].dropna() if "TLT" in px.columns else pd.Series(dtype=float),
-        "hyg":          lambda: px["HYG"].dropna() if "HYG" in px.columns else pd.Series(dtype=float),
-        "y10":          lambda: y10,
-        "y2":           lambda: y2,
-    }
+    # 2. Fall back to derived.py registry (computed series)
+    if s is None or (isinstance(s, pd.Series) and s.empty):
+        try:
+            from src.derived import DERIVED_SERIES
+            if series in DERIVED_SERIES:
+                s = DERIVED_SERIES[series](macro, px)
+        except ImportError:
+            pass
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Derived series error: {e}")
 
-    if series not in series_map:
+    # 3. Not found anywhere
+    if s is None or (isinstance(s, pd.Series) and s.empty):
+        # Build available list for error message
+        available = sorted(set(inline_map.keys()))
+        try:
+            from src.derived import DERIVED_SERIES
+            available = sorted(set(available) | set(DERIVED_SERIES.keys()))
+        except ImportError:
+            pass
+        if s is not None and isinstance(s, pd.Series) and s.empty:
+            return {"series": series, "range": range, "points": [], "meta": {}}
         raise HTTPException(
             status_code=404,
-            detail=f"Unknown series '{series}'. Available: {sorted(series_map.keys())}"
+            detail=f"Unknown series '{series}'. Available: {available}"
         )
-
-    try:
-        s = series_map[series]()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    if s.empty:
-        return {"series": series, "range": range, "points": [], "meta": {}}
 
     sliced = _slice(s, range)
 
-    # Compute basic stats for the response
     last_val  = float(sliced.iloc[-1]) if not sliced.empty else None
     first_val = float(sliced.iloc[0])  if not sliced.empty else None
-    change    = round(last_val - first_val, 4) if last_val and first_val else None
+    change    = round(last_val - first_val, 4) if last_val is not None and first_val is not None else None
 
     return {
         "series":  series,
         "range":   range,
         "points":  _to_points(sliced),
         "meta": {
-            "last":   round(last_val, 5) if last_val else None,
+            "last":   round(last_val, 5) if last_val is not None else None,
             "change": change,
             "min":    round(float(sliced.min()), 5) if not sliced.empty else None,
             "max":    round(float(sliced.max()), 5) if not sliced.empty else None,
@@ -123,7 +147,6 @@ def chart_price(
     ticker: str,
     range: str = Query("1y", description="1m | 3m | 6m | 1y | 2y | 5y"),
 ):
-    """Returns close price series for a given ETF ticker."""
     try:
         px = get_prices()
     except Exception as e:
