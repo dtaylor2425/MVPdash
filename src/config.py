@@ -15,6 +15,13 @@ ROTATION_ETFS = [
 
 FRED_SERIES = {
     # Rates
+    "nfci":         "NFCI",          # Chicago Fed National Financial Conditions Index
+    "umich":        "UMCSENT",       # U Michigan Consumer Sentiment  
+    "rrp":          "RRPONTSYD",     # Reverse repo (for net liquidity calc)
+    "tga":          "WTREGEN",       # Treasury General Account
+    "cpi_core":     "CPILFESL",      # Core CPI (ex food & energy)
+    "pce":          "PCEPI",         # PCE price index (Fed's preferred)
+    "y30":          "DGS30", 
     "y3m":          "DGS3MO",        # 3m Treasury
     "y2":           "DGS2",          # 2y Treasury
     "y5":           "DGS5",          # 5y Treasury  — needed for 5y5y forward
@@ -38,6 +45,10 @@ FRED_SERIES = {
 
 # yfinance proxies
 YF_PROXIES = {
+    "move":   "^MOVE",    # Bond volatility index
+    "tlt":    "TLT",      # Long treasury ETF
+    "hyg":    "HYG",      # HY bond ETF (price proxy)
+    "btc":    "BTC-USD",  # Bitcoin
     "oil":    "USO",
     "copper": "CPER",
     "gold":   "GLD",
