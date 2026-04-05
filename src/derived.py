@@ -2,19 +2,39 @@
 src/derived.py
 ═══════════════════════════════════════════════════════════════════════════════
 Computed / derived macro series. The charts router falls back to
-DERIVED_SERIES when a series key isn't found in raw FRED data.
+DERIVED_SERIES when a series key isn't found in raw FRED/inline data.
+
+IMPORTANT: yfinance stores columns under the DOWNLOAD ticker name,
+which may differ from the config key. For example:
+  config key "vix" → download ticker "^VIX" → column name "^VIX"
+  config key "btc" → download ticker "BTC-USD" → column name "BTC-USD"
+
+The _proxy() and _ratio() helpers must use the COLUMN NAME (download ticker),
+not the config key.
 """
 
 import numpy as np
 import pandas as pd
-from typing import Optional, Callable, Dict
+from typing import Callable, Dict
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: find a column with fallback names
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _find_col(df, *names):
+    """Return the first matching column Series, or empty."""
+    for n in names:
+        if n in df.columns:
+            return df[n].dropna()
+    return pd.Series(dtype=float)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5y5y Forward Rates
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fwd_5y5y_real(macro, proxies):
+def fwd_5y5y_real(macro, px):
     if "real10" not in macro.columns or "real5" not in macro.columns:
         return pd.Series(dtype=float)
     r10 = macro["real10"].dropna(); r5 = macro["real5"].dropna()
@@ -23,7 +43,7 @@ def fwd_5y5y_real(macro, proxies):
     return ((r10.reindex(idx) * 10 - r5.reindex(idx) * 5) / 5.0).dropna()
 
 
-def fwd_5y5y_inflation(macro, proxies):
+def fwd_5y5y_inflation(macro, px):
     for col in ["y10", "real10", "y5", "real5"]:
         if col not in macro.columns: return pd.Series(dtype=float)
     be10 = (macro["y10"] - macro["real10"]).dropna()
@@ -33,13 +53,13 @@ def fwd_5y5y_inflation(macro, proxies):
     return ((be10.reindex(idx) * 10 - be5.reindex(idx) * 5) / 5.0).dropna()
 
 
-def breakeven_10y(macro, proxies):
+def breakeven_10y(macro, px):
     if "y10" not in macro.columns or "real10" not in macro.columns:
         return pd.Series(dtype=float)
     return (macro["y10"] - macro["real10"]).dropna()
 
 
-def breakeven_5y(macro, proxies):
+def breakeven_5y(macro, px):
     if "y5" not in macro.columns or "real5" not in macro.columns:
         return pd.Series(dtype=float)
     return (macro["y5"] - macro["real5"]).dropna()
@@ -49,11 +69,11 @@ def breakeven_5y(macro, proxies):
 # Liquidity
 # ─────────────────────────────────────────────────────────────────────────────
 
-def net_liquidity(macro, proxies):
+def net_liquidity(macro, px):
     if "fed_assets" not in macro.columns: return pd.Series(dtype=float)
-    fa  = macro["fed_assets"].dropna()
-    rrp = macro.get("rrp", pd.Series(dtype=float)).dropna()
-    tga = macro.get("tga", pd.Series(dtype=float)).dropna()
+    fa = macro["fed_assets"].dropna()
+    rrp = macro["rrp"].dropna() if "rrp" in macro.columns else pd.Series(dtype=float)
+    tga = macro["tga"].dropna() if "tga" in macro.columns else pd.Series(dtype=float)
     idx = fa.index
     if not rrp.empty: idx = idx.intersection(rrp.index)
     if not tga.empty: idx = idx.intersection(tga.index)
@@ -65,10 +85,10 @@ def net_liquidity(macro, proxies):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Credit derived
+# Credit
 # ─────────────────────────────────────────────────────────────────────────────
 
-def hy_ig_diff(macro, proxies):
+def hy_ig_diff(macro, px):
     if "hy_oas" not in macro.columns or "ig_oas" not in macro.columns:
         return pd.Series(dtype=float)
     hy = macro["hy_oas"].dropna(); ig = macro["ig_oas"].dropna()
@@ -77,10 +97,10 @@ def hy_ig_diff(macro, proxies):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Monetary policy derived
+# Monetary policy
 # ─────────────────────────────────────────────────────────────────────────────
 
-def real_fed_funds(macro, proxies):
+def real_fed_funds(macro, px):
     if "fed_funds" not in macro.columns or "cpi" not in macro.columns:
         return pd.Series(dtype=float)
     ff = macro["fed_funds"].dropna(); cpi = macro["cpi"].dropna()
@@ -92,42 +112,62 @@ def real_fed_funds(macro, proxies):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cross-asset ratios (proxy-based)
+# Cross-asset ratios
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _ratio(col_a, col_b):
-    """Factory for simple ratio series from proxies."""
-    def fn(macro, proxies):
-        if col_a not in proxies.columns or col_b not in proxies.columns:
-            return pd.Series(dtype=float)
-        a = proxies[col_a].dropna(); b = proxies[col_b].dropna()
+def _ratio(names_a, names_b):
+    """Factory for ratio series. names_a/b are tuples of possible column names."""
+    if isinstance(names_a, str): names_a = (names_a,)
+    if isinstance(names_b, str): names_b = (names_b,)
+    def fn(macro, px):
+        a = _find_col(px, *names_a)
+        b = _find_col(px, *names_b)
+        if a.empty or b.empty: return pd.Series(dtype=float)
         idx = a.index.intersection(b.index)
         if len(idx) == 0: return pd.Series(dtype=float)
         return (a.reindex(idx) / b.reindex(idx)).dropna()
     return fn
 
 
-def spy_drawdown(macro, proxies):
-    if "SPY" not in proxies.columns: return pd.Series(dtype=float)
-    spy = proxies["SPY"].dropna()
+def spy_drawdown(macro, px):
+    spy = _find_col(px, "SPY")
     if spy.empty: return pd.Series(dtype=float)
     peak = spy.expanding().max()
     return ((spy - peak) / peak * 100).dropna()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Curve regime overlays (for the new curve context page)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def curve_hy_overlay(macro, px):
+    """2s10s curve for overlay charting."""
+    if "y10" not in macro.columns or "y2" not in macro.columns:
+        return pd.Series(dtype=float)
+    return (macro["y10"] - macro["y2"]).dropna()
+
+
+def cpi_yoy(macro, px):
+    """CPI Year-over-Year %"""
+    if "cpi" not in macro.columns: return pd.Series(dtype=float)
+    cpi = macro["cpi"].dropna()
+    if len(cpi) < 13: return pd.Series(dtype=float)
+    return (cpi.pct_change(12) * 100).dropna()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Proxy passthroughs
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _proxy(col):
-    def fn(macro, proxies):
-        if col not in proxies.columns: return pd.Series(dtype=float)
-        return proxies[col].dropna()
+def _proxy(*names):
+    """Factory for simple proxy passthrough. Tries multiple column names."""
+    def fn(macro, px):
+        return _find_col(px, *names)
     return fn
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Master registry — charts router looks up series keys here
+# Master registry
 # ─────────────────────────────────────────────────────────────────────────────
 
 DERIVED_SERIES: Dict[str, Callable] = {
@@ -146,31 +186,32 @@ DERIVED_SERIES: Dict[str, Callable] = {
 
     # Monetary
     "real_fed_funds":     real_fed_funds,
+    "cpi_yoy":            cpi_yoy,
 
-    # Cross-asset ratios
-    "copper_gold":        _ratio("CPER", "GLD"),
-    "rsp_spy":            _ratio("RSP", "SPY"),
-    "qqq_spy":            _ratio("QQQ", "SPY"),
-    "gold_silver":        _ratio("GLD", "SLV"),
-    "tlt_spy":            _ratio("TLT", "SPY"),
+    # Cross-asset ratios (use yfinance column names with fallbacks)
+    "copper_gold":        _ratio(("CPER",), ("GLD",)),
+    "rsp_spy":            _ratio(("RSP",), ("SPY",)),
+    "qqq_spy":            _ratio(("QQQ",), ("SPY",)),
+    "gold_silver":        _ratio(("GLD",), ("SLV",)),
+    "tlt_spy":            _ratio(("TLT",), ("SPY",)),
 
     # Equity
     "spy_drawdown":       spy_drawdown,
 
-    # VIX
-    "vratio":             _ratio("^VIX", "^VIX3M"),
+    # VIX (yfinance uses ^VIX as column name)
+    "vratio":             _ratio(("^VIX",), ("^VIX3M",)),
     "vix":                _proxy("^VIX"),
     "vix3m":              _proxy("^VIX3M"),
     "move":               _proxy("^MOVE"),
 
-    # Commodities & ETFs
+    # Commodities & ETF passthroughs
     "oil":                _proxy("USO"),
     "copper":             _proxy("CPER"),
     "gold":               _proxy("GLD"),
     "slv":                _proxy("SLV"),
     "tlt":                _proxy("TLT"),
     "hyg":                _proxy("HYG"),
-    "btc":                _proxy("BTC-USD"),
+    "btc":                _proxy("BTC-USD", "BTC"),
     "spy":                _proxy("SPY"),
     "qqq":                _proxy("QQQ"),
 }
