@@ -1,16 +1,7 @@
 """
 src/derived.py
-═══════════════════════════════════════════════════════════════════════════════
 Computed / derived macro series. The charts router falls back to
 DERIVED_SERIES when a series key isn't found in raw FRED/inline data.
-
-IMPORTANT: yfinance stores columns under the DOWNLOAD ticker name,
-which may differ from the config key. For example:
-  config key "vix" → download ticker "^VIX" → column name "^VIX"
-  config key "btc" → download ticker "BTC-USD" → column name "BTC-USD"
-
-The _proxy() and _ratio() helpers must use the COLUMN NAME (download ticker),
-not the config key.
 """
 
 import numpy as np
@@ -18,21 +9,12 @@ import pandas as pd
 from typing import Callable, Dict
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper: find a column with fallback names
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _find_col(df, *names):
-    """Return the first matching column Series, or empty."""
     for n in names:
         if n in df.columns:
             return df[n].dropna()
     return pd.Series(dtype=float)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5y5y Forward Rates
-# ─────────────────────────────────────────────────────────────────────────────
 
 def fwd_5y5y_real(macro, px):
     if "real10" not in macro.columns or "real5" not in macro.columns:
@@ -65,10 +47,6 @@ def breakeven_5y(macro, px):
     return (macro["y5"] - macro["real5"]).dropna()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Liquidity
-# ─────────────────────────────────────────────────────────────────────────────
-
 def net_liquidity(macro, px):
     if "fed_assets" not in macro.columns: return pd.Series(dtype=float)
     fa = macro["fed_assets"].dropna()
@@ -84,10 +62,6 @@ def net_liquidity(macro, px):
     return result.dropna()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Credit
-# ─────────────────────────────────────────────────────────────────────────────
-
 def hy_ig_diff(macro, px):
     if "hy_oas" not in macro.columns or "ig_oas" not in macro.columns:
         return pd.Series(dtype=float)
@@ -95,10 +69,6 @@ def hy_ig_diff(macro, px):
     idx = hy.index.intersection(ig.index)
     return (hy.reindex(idx) - ig.reindex(idx)).dropna()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Monetary policy
-# ─────────────────────────────────────────────────────────────────────────────
 
 def real_fed_funds(macro, px):
     if "fed_funds" not in macro.columns or "cpi" not in macro.columns:
@@ -111,12 +81,14 @@ def real_fed_funds(macro, px):
     return (ff.reindex(idx) - cpi_yoy.reindex(idx)).dropna()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Cross-asset ratios
-# ─────────────────────────────────────────────────────────────────────────────
+def cpi_yoy(macro, px):
+    if "cpi" not in macro.columns: return pd.Series(dtype=float)
+    cpi = macro["cpi"].dropna()
+    if len(cpi) < 13: return pd.Series(dtype=float)
+    return (cpi.pct_change(12) * 100).dropna()
+
 
 def _ratio(names_a, names_b):
-    """Factory for ratio series. names_a/b are tuples of possible column names."""
     if isinstance(names_a, str): names_a = (names_a,)
     if isinstance(names_b, str): names_b = (names_b,)
     def fn(macro, px):
@@ -136,75 +108,32 @@ def spy_drawdown(macro, px):
     return ((spy - peak) / peak * 100).dropna()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Curve regime overlays (for the new curve context page)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def curve_hy_overlay(macro, px):
-    """2s10s curve for overlay charting."""
-    if "y10" not in macro.columns or "y2" not in macro.columns:
-        return pd.Series(dtype=float)
-    return (macro["y10"] - macro["y2"]).dropna()
-
-
-def cpi_yoy(macro, px):
-    """CPI Year-over-Year %"""
-    if "cpi" not in macro.columns: return pd.Series(dtype=float)
-    cpi = macro["cpi"].dropna()
-    if len(cpi) < 13: return pd.Series(dtype=float)
-    return (cpi.pct_change(12) * 100).dropna()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Proxy passthroughs
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _proxy(*names):
-    """Factory for simple proxy passthrough. Tries multiple column names."""
     def fn(macro, px):
         return _find_col(px, *names)
     return fn
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Master registry
-# ─────────────────────────────────────────────────────────────────────────────
-
 DERIVED_SERIES: Dict[str, Callable] = {
-    # Forward rates
     "fwd_5y5y_real":      fwd_5y5y_real,
     "fwd_5y5y_inflation": fwd_5y5y_inflation,
     "breakeven":          breakeven_10y,
     "breakeven_10y":      breakeven_10y,
     "breakeven_5y":       breakeven_5y,
-
-    # Liquidity
     "net_liquidity":      net_liquidity,
-
-    # Credit
     "hy_ig_diff":         hy_ig_diff,
-
-    # Monetary
     "real_fed_funds":     real_fed_funds,
     "cpi_yoy":            cpi_yoy,
-
-    # Cross-asset ratios (use yfinance column names with fallbacks)
     "copper_gold":        _ratio(("CPER",), ("GLD",)),
     "rsp_spy":            _ratio(("RSP",), ("SPY",)),
     "qqq_spy":            _ratio(("QQQ",), ("SPY",)),
     "gold_silver":        _ratio(("GLD",), ("SLV",)),
     "tlt_spy":            _ratio(("TLT",), ("SPY",)),
-
-    # Equity
     "spy_drawdown":       spy_drawdown,
-
-    # VIX (yfinance uses ^VIX as column name)
     "vratio":             _ratio(("^VIX",), ("^VIX3M",)),
     "vix":                _proxy("^VIX"),
     "vix3m":              _proxy("^VIX3M"),
     "move":               _proxy("^MOVE"),
-
-    # Commodities & ETF passthroughs
     "oil":                _proxy("USO"),
     "copper":             _proxy("CPER"),
     "gold":               _proxy("GLD"),
