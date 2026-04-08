@@ -1,10 +1,7 @@
 """
 api/routers/charts.py
-GET /api/charts/{series}  — time series data for a named signal
-GET /api/charts/price/{ticker} — OHLC/close for an ETF
-
-Supports raw FRED series, derived/computed series (from src/derived.py),
-and yfinance proxy passthroughs.
+GET /api/charts/{series}  -- time series data for a named signal
+GET /api/charts/price/{ticker} -- OHLC/close for an ETF
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -19,12 +16,13 @@ router = APIRouter(tags=["Charts"])
 RANGES = {"1m": 21, "3m": 63, "6m": 126, "1y": 252, "2y": 504, "5y": 1260}
 
 
-def _slice(s: pd.Series, rng: str) -> pd.Series:
+def _slice(s, rng):
     days = RANGES.get(rng, 252)
-    return s.dropna().iloc[-days:] if len(s.dropna()) > days else s.dropna()
+    clean = s.dropna()
+    return clean.iloc[-days:] if len(clean) > days else clean
 
 
-def _to_points(s: pd.Series) -> list:
+def _to_points(s):
     return [
         {"date": str(idx.date()), "value": round(float(v), 5)}
         for idx, v in s.items()
@@ -32,16 +30,20 @@ def _to_points(s: pd.Series) -> list:
     ]
 
 
-# ── Inline series (fast, no import overhead) ─────────────────────────────────
 def _build_inline_map(macro, px):
-    """Series that are simple column lookups or one-line computations."""
     def _col(name):
         return macro[name].dropna() if name in macro.columns else pd.Series(dtype=float)
 
-    y10 = _col("y10"); y2 = _col("y2"); y3m = _col("y3m")
-    y5 = _col("y5"); y30 = _col("y30")
-    r10 = _col("real10"); r5 = _col("real5")
-    vix_t = "^VIX"; vix3m_t = "^VIX3M"
+    def _px(name):
+        return px[name].dropna() if name in px.columns else pd.Series(dtype=float)
+
+    y10 = _col("y10")
+    y2 = _col("y2")
+    y3m = _col("y3m")
+    y5 = _col("y5")
+    y30 = _col("y30")
+    r10 = _col("real10")
+    r5 = _col("real5")
 
     return {
         # Raw FRED columns
@@ -53,6 +55,7 @@ def _build_inline_map(macro, px):
         "y2":           lambda: y2,
         "y5":           lambda: y5,
         "y30":          lambda: y30,
+        "y3m":          lambda: y3m,
         "dollar":       lambda: _col("dollar_broad"),
         "fed_assets":   lambda: _col("fed_assets"),
         "init_claims":  lambda: _col("init_claims"),
@@ -69,8 +72,8 @@ def _build_inline_map(macro, px):
         "cpi_yoy":      lambda: (_col("cpi").pct_change(12) * 100).dropna() if "cpi" in macro.columns else pd.Series(dtype=float),
 
         # Proxy passthroughs
-        "spy":          lambda: px["SPY"].dropna() if "SPY" in px.columns else pd.Series(dtype=float),
-        "gld":          lambda: px["GLD"].dropna() if "GLD" in px.columns else pd.Series(dtype=float),
+        "spy":          lambda: _px("SPY"),
+        "gld":          lambda: _px("GLD"),
     }
 
 
@@ -104,11 +107,10 @@ def chart_series(
         except ImportError:
             pass
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Derived series error: {e}")
+            raise HTTPException(status_code=500, detail="Derived series error: {}".format(e))
 
     # 3. Not found anywhere
     if s is None or (isinstance(s, pd.Series) and s.empty):
-        # Build available list for error message
         available = sorted(set(inline_map.keys()))
         try:
             from src.derived import DERIVED_SERIES
@@ -119,7 +121,7 @@ def chart_series(
             return {"series": series, "range": range, "points": [], "meta": {}}
         raise HTTPException(
             status_code=404,
-            detail=f"Unknown series '{series}'. Available: {available}"
+            detail="Unknown series '{}'. Available: {}".format(series, available)
         )
 
     sliced = _slice(s, range)
@@ -154,7 +156,7 @@ def chart_price(
 
     t = ticker.upper()
     if t not in px.columns:
-        raise HTTPException(status_code=404, detail=f"Ticker {t} not in price data")
+        raise HTTPException(status_code=404, detail="Ticker {} not in price data".format(t))
 
     s      = px[t].dropna()
     sliced = _slice(s, range)
