@@ -11,40 +11,42 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
-from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES
+from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES, YF_PROXIES
 from src.regime import compute_regime_v3
 
-_cache: dict = {}
+_cache = {}
 
-# Separate lock per resource — prevents deadlock when get_regime
-# calls get_macro which would re-enter the same lock
 _macro_lock  = threading.Lock()
 _prices_lock = threading.Lock()
 _regime_lock = threading.Lock()
 
 _TTL = 30 * 60  # 30 minutes
 
-PRICE_TICKERS = [
-    "SPY", "QQQ", "IWM", "RSP", "TLT", "HYG", "GLD",
-    "XLU", "XLC", "CPER", "^VIX", "^VIX3M",
-]
+# Build ticker list from config so new proxies are automatically fetched.
+# Also include rotation ETFs and any extras not in YF_PROXIES.
+PRICE_TICKERS = sorted(set(
+    list(YF_PROXIES.values()) + [
+        "SPY", "QQQ", "IWM", "RSP", "TLT", "HYG", "GLD",
+        "XLU", "XLC", "CPER", "^VIX", "^VIX3M",
+    ]
+))
 
 
-def _is_fresh(key: str) -> bool:
+def _is_fresh(key):
     if key not in _cache:
         return False
     return (time.time() - _cache[key]["ts"]) < _TTL
 
 
-def _store(key: str, value):
+def _store(key, value):
     _cache[key] = {"data": value, "ts": time.time()}
 
 
-def _parquet_path() -> Path:
+def _parquet_path():
     return Path(CACHE_DIR) / "fred_macro.parquet"
 
 
-def _load_from_disk() -> pd.DataFrame:
+def _load_from_disk():
     p = _parquet_path()
     if p.exists():
         try:
@@ -52,7 +54,7 @@ def _load_from_disk() -> pd.DataFrame:
             df.index = pd.to_datetime(df.index)
             return df.sort_index().ffill()
         except Exception as e:
-            print(f"disk load error: {e}")
+            print("disk load error: {}".format(e))
     return pd.DataFrame()
 
 
@@ -67,12 +69,11 @@ def _fetch_fred_background():
                 _store("macro", fresh)
                 print("background FRED refresh complete")
         except Exception as e:
-            print(f"background FRED refresh failed: {e}")
+            print("background FRED refresh failed: {}".format(e))
     threading.Thread(target=_do, daemon=True).start()
 
 
-def _fetch_prices_with_timeout(tickers: list, period: str = "2y",
-                                timeout: int = 30) -> pd.DataFrame:
+def _fetch_prices_with_timeout(tickers, period="2y", timeout=30):
     def _download():
         try:
             df = yf.download(
@@ -85,7 +86,7 @@ def _fetch_prices_with_timeout(tickers: list, period: str = "2y",
             if isinstance(df.columns, pd.MultiIndex):
                 level0 = list(df.columns.get_level_values(0))
                 level1 = list(df.columns.get_level_values(1))
-                field_names = {"Close","Open","High","Low","Volume","Adj Close"}
+                field_names = {"Close", "Open", "High", "Low", "Volume", "Adj Close"}
                 if level0[0] in field_names:
                     for t in tickers:
                         if t in level1:
@@ -100,7 +101,7 @@ def _fetch_prices_with_timeout(tickers: list, period: str = "2y",
                         if t in level0:
                             try:
                                 sub = df[t]
-                                for col in ["Close","close","Adj Close"]:
+                                for col in ["Close", "close", "Adj Close"]:
                                     if isinstance(sub, pd.DataFrame) and col in sub.columns:
                                         out[t] = sub[col].dropna()
                                         break
@@ -110,7 +111,7 @@ def _fetch_prices_with_timeout(tickers: list, period: str = "2y",
                             except Exception:
                                 pass
             else:
-                for col in ["Close","close","Adj Close"]:
+                for col in ["Close", "close", "Adj Close"]:
                     if col in df.columns:
                         if len(tickers) == 1:
                             out[tickers[0]] = df[col].dropna()
@@ -119,7 +120,7 @@ def _fetch_prices_with_timeout(tickers: list, period: str = "2y",
                 return pd.DataFrame()
             return pd.DataFrame(out).dropna(how="all")
         except Exception as e:
-            print(f"price fetch error: {e}")
+            print("price fetch error: {}".format(e))
             return pd.DataFrame()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
@@ -131,13 +132,13 @@ def _fetch_prices_with_timeout(tickers: list, period: str = "2y",
             return pd.DataFrame()
 
 
-def get_macro() -> pd.DataFrame:
+def get_macro():
     with _macro_lock:
         if _is_fresh("macro"):
             return _cache["macro"]["data"]
         print("loading FRED from disk cache...")
         macro = _load_from_disk()
-        print(f"disk cache loaded: {macro.shape}")
+        print("disk cache loaded: {}".format(macro.shape))
         if macro.empty:
             print("no disk cache, fetching from FRED (slow)...")
             try:
@@ -146,22 +147,22 @@ def get_macro() -> pd.DataFrame:
                     FRED_SERIES, FRED_API_KEY, CACHE_DIR, cache_name="fred_macro"
                 ).sort_index()
             except Exception as e:
-                print(f"FRED fetch failed: {e}")
+                print("FRED fetch failed: {}".format(e))
                 macro = pd.DataFrame()
         _store("macro", macro)
         _fetch_fred_background()
         return macro
 
 
-def get_prices() -> pd.DataFrame:
+def get_prices():
     with _prices_lock:
         if _is_fresh("prices"):
             return _cache["prices"]["data"]
-        print("fetching prices...")
+        print("fetching prices for {} tickers...".format(len(PRICE_TICKERS)))
         px = _fetch_prices_with_timeout(PRICE_TICKERS, period="2y", timeout=30)
         if px is None:
             px = pd.DataFrame()
-        print(f"prices fetched: {px.shape}")
+        print("prices fetched: {}".format(px.shape))
         _store("prices", px.sort_index() if not px.empty else px)
         return _cache["prices"]["data"]
 
@@ -177,7 +178,7 @@ def get_regime():
             macro=macro, proxies=px,
             lookback_trend=63, momentum_lookback_days=21,
         )
-        print(f"regime computed: {result.score} {result.label}")
+        print("regime computed: {} {}".format(result.score, result.label))
         _store("regime", result)
         return result
 
