@@ -31,3 +31,4 @@ def assets_scored():
         raise HTTPException(status_code=500, detail="Asset scoring error: {}".format(str(e)))
 
     return {"assets": results}
+#comment

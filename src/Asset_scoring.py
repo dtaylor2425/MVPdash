@@ -424,3 +424,4 @@ def score_all_assets(
         }
 
     return results
+#new
