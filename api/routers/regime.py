@@ -14,21 +14,26 @@ router = APIRouter(tags=["Regime"])
 
 
 def _pillar_color(score):
-    if score >= 75: return "#1f7a4f"
-    if score >= 60: return "#16a34a"
-    if score >= 40: return "#6b7280"
-    if score >= 25: return "#d97706"
+    if score >= 75:
+        return "#1f7a4f"
+    if score >= 60:
+        return "#16a34a"
+    if score >= 40:
+        return "#6b7280"
+    if score >= 25:
+        return "#d97706"
     return "#ef4444"
 
 
 def _regime_color(label):
-    return {
+    colors = {
         "Risk On": "#1f7a4f",
         "Bullish": "#16a34a",
         "Neutral": "#6b7280",
         "Bearish": "#d97706",
         "Risk Off": "#ef4444",
-    }.get(label, "#6b7280")
+    }
+    return colors.get(label, "#6b7280")
 
 
 @router.get("/regime")
@@ -40,14 +45,20 @@ def regime_current():
 
     pillars = []
     pillar_keys = [
-        "growth_momentum", "inflation_price", "monetary_policy",
-        "market_internals", "fiscal_external", "sentiment",
+        "growth_momentum",
+        "inflation_price",
+        "monetary_policy",
+        "market_internals",
+        "fiscal_external",
+        "sentiment",
     ]
     for key in pillar_keys:
         comp = r.components.get(key, {})
-        score = int(round(
-            max(0, min(100, (float(comp.get("contribution", 0)) / max(float(comp.get("weight", 0.1)), 0.01) + 1) * 50))
-        )) if comp.get("weight") else 50
+        weight = float(comp.get("weight", 0.1))
+        if weight == 0:
+            weight = 0.1
+        contrib = float(comp.get("contribution", 0))
+        score = int(round(max(0, min(100, (contrib / weight + 1) * 50))))
         pillars.append({
             "key": key,
             "name": comp.get("name", key.replace("_", " ").title()),
@@ -74,7 +85,7 @@ def regime_current():
 
 @router.get("/regime/history")
 def regime_history(
-    freq: str = Query("W-FRI", description="Resampling frequency: W-FRI, M, etc."),
+    freq: str = Query("W-FRI", description="Resampling frequency"),
 ):
     """Weekly regime score history for the regime history chart."""
     try:
@@ -88,12 +99,18 @@ def regime_history(
 
     try:
         ts = compute_regime_timeseries(
-            macro=macro, proxies=px,
-            lookback_trend=63, freq=freq,
-            min_points=60, z_window=252,
+            macro=macro,
+            proxies=px,
+            lookback_trend=63,
+            freq=freq,
+            min_points=60,
+            z_window=252,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Regime history error: {}".format(str(e)))
+        raise HTTPException(
+            status_code=500,
+            detail="Regime history error: {}".format(str(e)),
+        )
 
     if ts.empty:
         return {"points": [], "meta": {}}
