@@ -1,7 +1,6 @@
 """
 src/derived.py
-Computed / derived macro series. The charts router falls back to
-DERIVED_SERIES when a series key isn't found in raw FRED/inline data.
+Computed / derived macro series.
 """
 
 import numpy as np
@@ -115,32 +114,66 @@ def _proxy(*names):
 
 
 DERIVED_SERIES: Dict[str, Callable] = {
+    # Forward rates
     "fwd_5y5y_real":      fwd_5y5y_real,
     "fwd_5y5y_inflation": fwd_5y5y_inflation,
     "breakeven":          breakeven_10y,
     "breakeven_10y":      breakeven_10y,
     "breakeven_5y":       breakeven_5y,
+
+    # Liquidity
     "net_liquidity":      net_liquidity,
+
+    # Credit
     "hy_ig_diff":         hy_ig_diff,
+
+    # Monetary
     "real_fed_funds":     real_fed_funds,
     "cpi_yoy":            cpi_yoy,
+
+    # Cross-asset ratios
     "copper_gold":        _ratio(("CPER",), ("GLD",)),
     "rsp_spy":            _ratio(("RSP",), ("SPY",)),
     "qqq_spy":            _ratio(("QQQ",), ("SPY",)),
     "gold_silver":        _ratio(("GLD",), ("SLV",)),
     "tlt_spy":            _ratio(("TLT",), ("SPY",)),
+
+    # Equity
     "spy_drawdown":       spy_drawdown,
+
+    # VIX
     "vratio":             _ratio(("^VIX",), ("^VIX3M",)),
     "vix":                _proxy("^VIX"),
     "vix3m":              _proxy("^VIX3M"),
     "move":               _proxy("^MOVE"),
+
+    # Core equity ETFs (lowercase keys for chart URL resolution)
+    "spy":                _proxy("SPY"),
+    "qqq":                _proxy("QQQ"),
+    "iwm":                _proxy("IWM"),
+    "rsp":                _proxy("RSP"),
+
+    # Sector ETFs
+    "xle":                _proxy("XLE"),
+    "xlf":                _proxy("XLF"),
+    "xlk":                _proxy("XLK"),
+    "smh":                _proxy("SMH"),
+    "xli":                _proxy("XLI"),
+    "xlv":                _proxy("XLV"),
+    "xlp":                _proxy("XLP"),
+    "xlu":                _proxy("XLU"),
+    "xlc":                _proxy("XLC"),
+
+    # Commodities
     "oil":                _proxy("USO"),
     "copper":             _proxy("CPER"),
     "gold":               _proxy("GLD"),
     "slv":                _proxy("SLV"),
+
+    # Bonds
     "tlt":                _proxy("TLT"),
     "hyg":                _proxy("HYG"),
+
+    # Crypto
     "btc":                _proxy("BTC-USD", "BTC"),
-    "spy":                _proxy("SPY"),
-    "qqq":                _proxy("QQQ"),
 }
