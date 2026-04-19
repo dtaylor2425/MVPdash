@@ -24,7 +24,11 @@ if _ROOT not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import regime, assets, signals, charts
+from api.routers import regime, assets, signals, charts, stocks
+try:
+    from api.routers import playbook
+except ImportError:
+    playbook = None
 
 app = FastAPI(
     title="Macro Engine API",
@@ -33,7 +37,7 @@ app = FastAPI(
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-# Allow requests from production, all Vercel preview deploys, and localhost
+# Allow requests from your Next.js frontend and localhost for development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -42,17 +46,19 @@ app.add_middleware(
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-app.include_router(regime.router,  prefix="/api")
-app.include_router(assets.router,  prefix="/api")
-app.include_router(signals.router, prefix="/api")
-app.include_router(charts.router,  prefix="/api")
+app.include_router(regime.router,   prefix="/api")
+app.include_router(assets.router,   prefix="/api")
+app.include_router(signals.router,  prefix="/api")
+app.include_router(charts.router,   prefix="/api")
+app.include_router(stocks.router,   prefix="/api")
+if playbook:
+    app.include_router(playbook.router, prefix="/api")
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
