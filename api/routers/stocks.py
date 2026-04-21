@@ -416,15 +416,15 @@ def stock_chart(
 
     def _safe_float(series, idx):
         try:
-            v = series.loc[idx]
-            return round(float(v), 2) if v is not None and not np.isnan(float(v)) else None
+            v = float(series.loc[idx])
+            return None if (np.isnan(v) or np.isinf(v)) else round(v, 2)
         except Exception:
             return None
 
     def _safe_int(series, idx):
         try:
-            v = series.loc[idx]
-            return int(v) if v is not None and not np.isnan(float(v)) else None
+            v = float(series.loc[idx])
+            return None if (np.isnan(v) or np.isinf(v)) else int(v)
         except Exception:
             return None
 
@@ -442,14 +442,21 @@ def stock_chart(
             "ma200":  _safe_float(ma200,  idx),
         })
 
+    def _sf(v):
+        try:
+            f = float(v)
+            return None if (np.isnan(f) or np.isinf(f)) else round(f, 2)
+        except Exception:
+            return None
+
     out = {
         "ticker": ticker,
         "period": period,
         "points": points,
         "meta": {
-            "last":     round(float(close.iloc[-1]), 2),
-            "high_52w": round(float(close.rolling(min(252, len(close))).max().iloc[-1]), 2),
-            "low_52w":  round(float(close.rolling(min(252, len(close))).min().iloc[-1]), 2),
+            "last":     _sf(close.iloc[-1]),
+            "high_52w": _sf(close.rolling(min(252, len(close))).max().iloc[-1]),
+            "low_52w":  _sf(close.rolling(min(252, len(close))).min().iloc[-1]),
             "count":    len(points),
         }
     }
