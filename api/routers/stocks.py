@@ -379,29 +379,67 @@ def stock_chart(
     if cached:
         return cached
 
-    df = _yf_history(ticker, period=period)
+    try:
+        t = yf.Ticker(ticker)
+        df = t.history(period=period, auto_adjust=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Price fetch failed: {e}")
+
     if df is None or df.empty:
         raise HTTPException(status_code=404, detail=f"No price data for {ticker}")
 
-    close = df["Close"].dropna()
+    # Flatten MultiIndex if present
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    def _col(name):
+        """Safely get a column as a float Series."""
+        if name not in df.columns:
+            return pd.Series(dtype=float, index=df.index)
+        s = df[name]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        return pd.to_numeric(s, errors='coerce')
+
+    close  = _col("Close").dropna()
+    open_  = _col("Open")
+    high   = _col("High")
+    low    = _col("Low")
+    volume = _col("Volume")
+
+    if close.empty:
+        raise HTTPException(status_code=404, detail=f"No close price data for {ticker}")
 
     ma50  = close.rolling(50,  min_periods=20).mean()
     ma100 = close.rolling(100, min_periods=40).mean()
     ma200 = close.rolling(200, min_periods=80).mean()
 
+    def _safe_float(series, idx):
+        try:
+            v = series.loc[idx]
+            return round(float(v), 2) if v is not None and not np.isnan(float(v)) else None
+        except Exception:
+            return None
+
+    def _safe_int(series, idx):
+        try:
+            v = series.loc[idx]
+            return int(v) if v is not None and not np.isnan(float(v)) else None
+        except Exception:
+            return None
+
     points = []
     for idx in close.index:
-        d = str(idx.date())
         points.append({
-            "date":   d,
-            "open":   round(float(df["Open"].loc[idx]), 2)   if idx in df.index else None,
-            "high":   round(float(df["High"].loc[idx]), 2)   if idx in df.index else None,
-            "low":    round(float(df["Low"].loc[idx]), 2)    if idx in df.index else None,
-            "close":  round(float(close.loc[idx]), 2),
-            "volume": int(df["Volume"].loc[idx]) if idx in df.index and not np.isnan(df["Volume"].loc[idx]) else None,
-            "ma50":   round(float(ma50.loc[idx]), 2)  if not np.isnan(ma50.loc[idx])  else None,
-            "ma100":  round(float(ma100.loc[idx]), 2) if not np.isnan(ma100.loc[idx]) else None,
-            "ma200":  round(float(ma200.loc[idx]), 2) if not np.isnan(ma200.loc[idx]) else None,
+            "date":   str(idx.date()),
+            "open":   _safe_float(open_,  idx),
+            "high":   _safe_float(high,   idx),
+            "low":    _safe_float(low,    idx),
+            "close":  _safe_float(close,  idx),
+            "volume": _safe_int(volume,   idx),
+            "ma50":   _safe_float(ma50,   idx),
+            "ma100":  _safe_float(ma100,  idx),
+            "ma200":  _safe_float(ma200,  idx),
         })
 
     out = {
@@ -410,8 +448,8 @@ def stock_chart(
         "points": points,
         "meta": {
             "last":     round(float(close.iloc[-1]), 2),
-            "high_52w": round(float(close.rolling(252).max().iloc[-1]), 2),
-            "low_52w":  round(float(close.rolling(252).min().iloc[-1]), 2),
+            "high_52w": round(float(close.rolling(min(252, len(close))).max().iloc[-1]), 2),
+            "low_52w":  round(float(close.rolling(min(252, len(close))).min().iloc[-1]), 2),
             "count":    len(points),
         }
     }
