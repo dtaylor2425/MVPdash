@@ -309,7 +309,7 @@ def _score_trend(bars: list, ind: dict) -> dict:
         slope_pct = ((e21 - e21_prev) / e21_prev) * 100
     checks.append({
         "label": "Trend slope",
-        "pass":  abs(slope_pct) > 0.5,
+        "pass":  abs(slope_pct) > 0.1,
         "detail": f"{slope_pct:+.2f}% over {lookback}b",
     })
 
@@ -328,19 +328,21 @@ def _score_trend(bars: list, ind: dict) -> dict:
         "detail": f"{adx_v:.1f}" if adx_v is not None else "—",
     })
 
-    # 5. Trend duration: bars 21 EMA has been monotonic
-    duration = 0
-    for k in range(i, 0, -1):
+    # 5. Trend duration: count bars where 21 EMA moved in trend direction
+    # Uses a looser check — allows minor counter-moves (real trends aren't perfectly monotonic)
+    lookback_dur = min(80, i)
+    bars_in_dir = 0
+    for k in range(i, max(0, i - lookback_dur), -1):
         prev = ind["ema21"][k-1]
         curr = ind["ema21"][k]
         if curr is None or prev is None:
             break
-        if bull_stack and curr > prev:
-            duration += 1
-        elif bear_stack and curr < prev:
-            duration += 1
-        else:
-            break
+        if bull_stack and curr >= prev:
+            bars_in_dir += 1
+        elif bear_stack and curr <= prev:
+            bars_in_dir += 1
+    # Duration = total bars scanned where EMA moved correctly (allows gaps)
+    duration = bars_in_dir
     checks.append({
         "label": "Trend duration ≥ 40 bars",
         "pass":  duration >= 40,
@@ -505,6 +507,29 @@ def momentum_batch(req: BatchRequest):
             "sparkline":  [b["close"] for b in bars[-60:]],
         }
     return {"results": results}
+
+
+@router.get("/momentum/debug/{symbol}")
+def momentum_debug(symbol: str):
+    """Debug endpoint — shows raw scores for a single symbol."""
+    sym = symbol.upper()
+    bars = _fetch_ohlcv_single(sym)
+    if not bars:
+        raise HTTPException(status_code=404, detail=f"No data for {sym}")
+    ind   = _compute_indicators(bars)
+    trend = _score_trend(bars, ind)
+    i     = len(bars) - 1
+    return {
+        "symbol":    sym,
+        "bars":      len(bars),
+        "last_price": bars[-1]["close"],
+        "trend":     trend,
+        "last_ema8":  ind["ema8"][i],
+        "last_ema21": ind["ema21"][i],
+        "last_ema89": ind["ema89"][i],
+        "last_adx":   ind["adx13"][i],
+        "last_atr":   ind["atr14"][i],
+    }
 
 
 @router.get("/momentum/screener")
