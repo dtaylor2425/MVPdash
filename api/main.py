@@ -23,7 +23,7 @@ if _ROOT not in sys.path:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
+from api.routers import momentum
 from api.routers import regime, assets, signals, charts, stocks
 try:
     from api.routers import playbook
@@ -57,6 +57,7 @@ app.include_router(assets.router,   prefix="/api")
 app.include_router(signals.router,  prefix="/api")
 app.include_router(charts.router,   prefix="/api")
 app.include_router(stocks.router,   prefix="/api")
+app.include_router(momentum.router, prefix="/api")
 if playbook:
     app.include_router(playbook.router, prefix="/api")
 
