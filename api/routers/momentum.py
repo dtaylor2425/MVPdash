@@ -13,6 +13,7 @@ Caching: OHLCV 6h, screener 4h (data doesn't change intraday until close).
 
 import os, time, threading, math
 from typing import Optional, List
+from pydantic import BaseModel
 import numpy as np
 import requests
 from fastapi import APIRouter, HTTPException, Query
