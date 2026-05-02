@@ -16,7 +16,6 @@ from typing import Optional, List
 import numpy as np
 import requests
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
 
 router = APIRouter(tags=["Momentum"])
 
@@ -381,16 +380,45 @@ def _safe_floats(d: dict) -> dict:
 
 # ── Screener universe ─────────────────────────────────────────────────────────
 
+# Full universe — S&P 500 large caps + mid caps + high-momentum names
+# Grouped by category for readability
 SCREENER_UNIVERSE = [
-    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","JPM","LLY",
-    "V","UNH","XOM","MA","HD","PG","COST","JNJ","ABBV","MRK","CRM","BAC",
-    "CVX","NFLX","AMD","TMO","KO","PEP","WMT","ADBE","MCD","ACN","LIN",
-    "CSCO","ABT","TXN","DHR","NKE","PM","NEE","QCOM","INTU","DIS","AMGN",
-    "BMY","UNP","HON","CAT","GE","LOW","SPGI","MS","AXP","ISRG","SBUX",
-    "BLK","GS","SYK","GILD","MDT","CB","ADI","REGN","VRTX","C","DE","MO",
-    "ZTS","BSX","ETN","MMC","PGR","LRCX","SO","DUK","CI","HCA","TJX","EOG",
-    "SHW","ELV","ITW","AON","COP","MCK","GD","RTX","NOW","PANW","CRWD","SNOW",
-    "COIN","MSTR","PLTR","HOOD","RBLX","DKNG","SOFI","AFRM","RIVN","LCID",
+    # Mega cap tech
+    "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","AVGO","ORCL",
+    "ADBE","CRM","INTU","NOW","SNOW","PANW","CRWD","ZS","DDOG","NET",
+    "AMD","INTC","QCOM","TXN","AMAT","LRCX","KLAC","MRVL","MU","SMCI",
+    # Financials
+    "JPM","BAC","WFC","GS","MS","BLK","SCHW","AXP","V","MA","PYPL","SQ",
+    "SPGI","MCO","ICE","CME","CBOE","HOOD","COIN","MSTR",
+    # Healthcare / biotech
+    "LLY","UNH","JNJ","ABBV","MRK","PFE","TMO","ABT","DHR","BSX",
+    "MDT","SYK","ISRG","VRTX","REGN","AMGN","BIIB","GILD","BMY","CI",
+    "HCA","ELV","CVS","MCK","CAH",
+    # Consumer
+    "AMZN","WMT","COST","HD","LOW","TGT","TJX","SBUX","MCD","YUM",
+    "NKE","LULU","DECK","ONON","SKX","CMG","DPZ","WING","SHAK",
+    "KO","PEP","PM","MO","STZ","BUD","MNST","CELH",
+    # Industrials / energy
+    "CAT","DE","HON","GE","ETN","EMR","ROK","PH","ITW","MMM",
+    "XOM","CVX","COP","EOG","SLB","HAL","MPC","VLO","PSX","OXY",
+    "NEE","SO","DUK","AEP","EXC","PCG","D",
+    # Growth / high momentum
+    "PLTR","RBLX","DKNG","SOFI","AFRM","UPST","OPEN","CVNA","CARVANA",
+    "SHOP","MELI","SE","GRAB","BABA","JD","PDD","BIDU",
+    "UBER","LYFT","ABNB","DASH","RDFN",
+    "TSLA","RIVN","NIO","LCID","FSR","XPEV","LI",
+    "SPOT","NFLX","DIS","PARA","WBD","ROKU",
+    "TWLO","OKTA","GTLB","HCP","CFLT","MDB","ESTC",
+    # Commodities / materials / metals
+    "GLD","SLV","GDX","GDXJ","GOLD","NEM","AEM","WPM","FNV",
+    "FCX","SCCO","VALE","RIO","BHP","AA","X","CLF","NUE","STLD",
+    "CF","MOS","NTR","ADM","BG",
+    # Real estate / REITs
+    "PLD","AMT","EQIX","CCI","SPG","O","VICI","WELL","DLR","PSA",
+    # Small / mid cap momentum
+    "CELH","AXON","PODD","TMDX","HRMY","RXRX","ACHR","JOBY","LILM",
+    "APP","CIEN","ONTO","IPGP","COHU","FORM","RMBS","UCTT",
+    "DUOL","HIMS","GKOS","INSP","SWAV","NTRA","ARDX","TGTX",
 ]
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -478,23 +506,33 @@ def momentum_batch(req: BatchRequest):
     return {"results": results}
 
 
-class ScreenerFilters(BaseModel):
-    direction:    str   = "ANY"      # UP / DOWN / ANY
-    min_score:    int   = 3
-    min_adx:      float = 20.0
-    min_duration: int   = 40
-    require_50:   bool  = True
-    max_spread_atr: Optional[float] = None   # EMA compactness
-    max_dist_21:    Optional[float] = None   # distance from 21 EMA in ATRs
-    max_tickers:  int   = 60
-
-@router.post("/momentum/screener")
-def momentum_screener(filters: ScreenerFilters):
+@router.get("/momentum/screener")
+def momentum_screener(
+    direction:      str   = Query("ANY"),
+    min_score:      int   = Query(3),
+    min_adx:        float = Query(20.0),
+    min_duration:   int   = Query(40),
+    require_50:     bool  = Query(True),
+    max_spread_atr: Optional[float] = Query(None),
+    max_dist_21:    Optional[float] = Query(None),
+    max_tickers:    int   = Query(60),
+):
+    class _F:
+        pass
+    filters = _F()
+    filters.direction      = direction
+    filters.min_score      = min_score
+    filters.min_adx        = min_adx
+    filters.min_duration   = min_duration
+    filters.require_50     = require_50
+    filters.max_spread_atr = max_spread_atr
+    filters.max_dist_21    = max_dist_21
+    filters.max_tickers    = max_tickers
     """
     Full screener pipeline — pre-filter universe, score, rank, return results.
     Cached 4h. POST so filters aren't in the URL.
     """
-    cache_key = f"screener:{filters.json()}"
+    cache_key = f"screener:{direction}:{min_score}:{min_adx}:{min_duration}:{require_50}:{max_spread_atr}:{max_dist_21}:{max_tickers}"
     cached = _get(cache_key, 4 * 3600)
     if cached:
         return cached
