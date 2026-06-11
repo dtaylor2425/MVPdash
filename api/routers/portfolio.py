@@ -158,15 +158,15 @@ def _compute_weights(regime_score, signals, r10_val, hy_z, dol_z):
     """
     # Step 1: Bucket allocations
     if regime_score >= 75:
-        risk_pct, mod_pct, def_pct = 0.55, 0.15, 0.30
+        risk_pct, mod_pct, def_pct = 0.72, 0.12, 0.16
     elif regime_score >= 60:
-        risk_pct, mod_pct, def_pct = 0.45, 0.18, 0.37
+        risk_pct, mod_pct, def_pct = 0.60, 0.15, 0.25
     elif regime_score >= 45:
-        risk_pct, mod_pct, def_pct = 0.35, 0.20, 0.45
+        risk_pct, mod_pct, def_pct = 0.50, 0.18, 0.32
     elif regime_score >= 30:
-        risk_pct, mod_pct, def_pct = 0.20, 0.22, 0.58
+        risk_pct, mod_pct, def_pct = 0.32, 0.20, 0.48
     else:
-        risk_pct, mod_pct, def_pct = 0.08, 0.15, 0.77
+        risk_pct, mod_pct, def_pct = 0.12, 0.16, 0.72
 
     # Step 2: Within-bucket weights
 
@@ -179,10 +179,10 @@ def _compute_weights(regime_score, signals, r10_val, hy_z, dol_z):
 
     # Growth/momentum tilt when conditions support it
     if "credit_tight" in signals and "claims_healthy" in signals:
-        rw["SMH"] += 0.06; rw["QQQ"] += 0.04; rw["XLK"] += 0.03
-        rw["IWM"] += 0.02
-        rw["SPY"] -= 0.06; rw["XLE"] -= 0.04; rw[BTC_TICKER] -= 0.02
-        rw["XLI"] -= 0.03
+        rw["SMH"] += 0.08; rw["QQQ"] += 0.06; rw["XLK"] += 0.04
+        rw["IWM"] += 0.03; rw["XLE"] += 0.02
+        rw["SPY"] -= 0.08; rw["SHY"] = rw.get("SHY", 0)
+        rw["XLI"] -= 0.03; rw["XLC"] -= 0.02
 
     # Stress → underweight high-beta, overweight quality
     if "credit_wide" in signals:
@@ -228,7 +228,7 @@ def _compute_weights(regime_score, signals, r10_val, hy_z, dol_z):
         mw[k] /= total
 
     # ── DEFENSIVE BUCKET (GLD, SLV, TLT, SHY) ──
-    dw = {"GLD": 0.30, "SLV": 0.12, "TLT": 0.28, "SHY": 0.30}
+    dw = {"GLD": 0.35, "SLV": 0.18, "TLT": 0.27, "SHY": 0.20}
 
     if r10_val is not None and r10_val < 1.0:
         dw["GLD"] += 0.12; dw["SLV"] += 0.10
@@ -333,9 +333,16 @@ def _run_simulation(macro, prices):
 
     # Init equal weight
     current_weights = {}
-    eq_w = 1.0 / len(all_assets) if all_assets else 0
+    # Start with a neutral-regime allocation, not equal weight
+    current_weights = _compute_weights(50, ["claims_healthy"], 1.5, -0.2, 0.0)
+    # Only keep weights for assets we have
+    init_total = 0
     for a in all_assets:
-        current_weights[a] = eq_w
+        current_weights[a] = current_weights.get(a, 0)
+        init_total += current_weights[a]
+    if init_total > 0:
+        for a in all_assets:
+            current_weights[a] /= init_total
 
     portfolio_value = [1.0]
     spy_value = [1.0]
