@@ -1,22 +1,11 @@
 """
 api/main.py
-═══════════════════════════════════════════════════════════════════════════════
 Macro Engine FastAPI backend.
-
-Exposes your existing Python engine (src/regime.py, src/data_sources.py, etc.)
-as a REST API so the Next.js frontend can consume live data.
-
-Run locally:
-    uvicorn api.main:app --reload --port 8000
-
-Deploy on Railway:
-    Start command: uvicorn api.main:app --host 0.0.0.0 --port $PORT
 """
 
 import sys
 import os
 
-# Make sure src/ is importable from anywhere
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -26,6 +15,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import regime, assets, signals, charts, stocks
 try:
+    from api.routers import portfolio
+except ImportError:
+    portfolio = None
+try:
+    from api.routers import screener
+except ImportError:
+    screener = None
+try:
     from api.routers import playbook
 except ImportError:
     playbook = None
@@ -33,11 +30,9 @@ except ImportError:
 app = FastAPI(
     title="Macro Engine API",
     description="Quantitative macro regime scoring and asset signals.",
-    version="1.0.0",
+    version="1.2.0",
 )
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
-# Allow requests from your Next.js frontend and localhost for development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -47,21 +42,23 @@ app.add_middleware(
         "http://127.0.0.1:3000",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
-# ── Routers ───────────────────────────────────────────────────────────────────
-app.include_router(regime.router,   prefix="/api")
-app.include_router(assets.router,   prefix="/api")
-app.include_router(signals.router,  prefix="/api")
-app.include_router(charts.router,   prefix="/api")
+app.include_router(regime.router,    prefix="/api")
+app.include_router(assets.router,    prefix="/api")
+app.include_router(signals.router,   prefix="/api")
+app.include_router(charts.router,    prefix="/api")
 app.include_router(stocks.router,    prefix="/api")
+if portfolio:
+    app.include_router(portfolio.router, prefix="/api")
+if screener:
+    app.include_router(screener.router,  prefix="/api")
 if playbook:
-    app.include_router(playbook.router, prefix="/api")
+    app.include_router(playbook.router,  prefix="/api")
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -71,6 +68,6 @@ def health():
 def root():
     return {
         "name": "Macro Engine API",
-        "version": "1.0.0",
+        "version": "1.2.0",
         "docs": "/docs",
     }
