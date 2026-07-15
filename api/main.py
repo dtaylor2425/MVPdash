@@ -1,6 +1,3 @@
-"""
-api/main.py
-"""
 import sys, os
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _ROOT not in sys.path:
@@ -8,7 +5,7 @@ if _ROOT not in sys.path:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from api.routers import regime, assets, signals, charts, stocks
+from api.routers import regime, assets, signals, charts, stocks, stock_intelligence
 
 try:
     from api.routers import portfolio
@@ -37,6 +34,7 @@ app.include_router(assets.router,   prefix="/api")
 app.include_router(signals.router,  prefix="/api")
 app.include_router(charts.router,   prefix="/api")
 app.include_router(stocks.router,   prefix="/api")
+app.include_router(stock_intelligence.router)
 if portfolio:  app.include_router(portfolio.router, prefix="/api")
 if screener:   app.include_router(screener.router,  prefix="/api")
 if playbook:   app.include_router(playbook.router,  prefix="/api")

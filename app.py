@@ -1,11 +1,9 @@
-# app.py  — Home page
 import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
 import plotly.graph_objects as go
 from datetime import date
-
 from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES, YF_PROXIES
 from src.data_sources import fetch_prices, get_fred_cached
 from src.regime import compute_regime_v3
