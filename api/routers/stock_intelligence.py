@@ -28,7 +28,7 @@ import pandas as pd
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query
 
-router = APIRouter(prefix="/api/stocks", tags=["stock-intelligence"])
+router = APIRouter(prefix="/api/stock-intelligence", tags=["stock-intelligence"])
 
 # In-memory cache. Railway instances may restart, so this is an acceleration
 # layer rather than durable storage.
@@ -53,6 +53,83 @@ MOVER_TTL_SECONDS = 300
 STOCK_TTL_SECONDS = 900
 MAX_MOVER_CANDIDATES = 48
 MAX_WORKERS = 6
+
+# Fallback discovery universe used only when Yahoo's predefined screen endpoint
+# returns no candidates. This prevents the mover board from going completely
+# blank when the screener endpoint is unavailable or rate-limited.
+FALLBACK_MOVER_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO",
+    "AMD", "NFLX", "PLTR", "ORCL", "CRM", "ADBE", "NOW", "SNOW",
+    "CRWD", "PANW", "NET", "DDOG", "MDB", "SHOP", "UBER", "ABNB",
+    "COIN", "HOOD", "MSTR", "SOFI", "RBLX", "RDDT", "APP", "ARM",
+    "SMCI", "MU", "MRVL", "CRDO", "AVGO", "QCOM", "INTC", "TSM",
+    "ASML", "LRCX", "KLAC", "AMAT", "ON", "MPWR", "ALAB", "VRT",
+    "GEV", "CEG", "OKLO", "SMR", "NNE", "LEU", "CCJ", "RKLB",
+    "ASTS", "LUNR", "JOBY", "ACHR", "IONQ", "RGTI", "QBTS", "QUBT",
+    "HIMS", "TEM", "RXRX", "SOUN", "BBAI", "AI", "PATH", "U",
+    "CVNA", "CAVA", "CELH", "ELF", "DECK", "LULU", "NKE", "BROS",
+    "XOM", "CVX", "OXY", "SLB", "FCX", "NEM", "GOLD", "SCCO",
+    "JPM", "GS", "MS", "BAC", "C", "SCHW", "AXP", "V",
+    "MA", "LLY", "UNH", "VRTX", "REGN", "ISRG", "TMDX", "VKTX",
+]
+
+
+def _fallback_mover_candidates(limit: int) -> List[Tuple[str, str]]:
+    """
+    Rank a curated liquid-stock universe by the latest absolute daily move.
+
+    This is only used when Yahoo's predefined screener endpoint returns zero
+    candidates. The subsequent full mover analysis still calculates price shock,
+    relative volume, sector strength, continuation, and fundamentals.
+    """
+    frame = _safe_download(FALLBACK_MOVER_UNIVERSE, period="10d")
+
+    if frame.empty:
+        return [
+            (symbol, "fallback_liquid_universe")
+            for symbol in FALLBACK_MOVER_UNIVERSE[:MAX_MOVER_CANDIDATES]
+        ]
+
+    try:
+        if isinstance(frame.columns, pd.MultiIndex):
+            if "Close" in frame.columns.get_level_values(0):
+                closes = frame["Close"].copy()
+            elif "Adj Close" in frame.columns.get_level_values(0):
+                closes = frame["Adj Close"].copy()
+            else:
+                raise KeyError("No close field in multi-index download")
+        else:
+            close_column = (
+                "Close"
+                if "Close" in frame.columns
+                else "Adj Close"
+            )
+            closes = frame[[close_column]].copy()
+            closes.columns = [FALLBACK_MOVER_UNIVERSE[0]]
+
+        returns = closes.pct_change().iloc[-1].dropna()
+        ranked = returns.abs().sort_values(ascending=False)
+
+        symbols = [
+            str(symbol).upper()
+            for symbol in ranked.index.tolist()
+            if str(symbol).upper() in set(FALLBACK_MOVER_UNIVERSE)
+        ]
+
+        if not symbols:
+            symbols = FALLBACK_MOVER_UNIVERSE[:]
+
+        return [
+            (symbol, "fallback_liquid_universe")
+            for symbol in symbols[: min(MAX_MOVER_CANDIDATES, max(limit * 2, 20))]
+        ]
+
+    except Exception:
+        return [
+            (symbol, "fallback_liquid_universe")
+            for symbol in FALLBACK_MOVER_UNIVERSE[:MAX_MOVER_CANDIDATES]
+        ]
+
 
 
 def _cache_get(key: str) -> Any:
@@ -2499,6 +2576,18 @@ def _full_stock_payload(symbol: str) -> Dict[str, Any]:
     }
 
 
+
+@router.get("/status")
+def get_stock_intelligence_status() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "router_prefix": "/api/stock-intelligence",
+        "yfinance_version": getattr(yf, "__version__", "unknown"),
+        "movers_endpoint": "/api/stock-intelligence/movers",
+        "workbook_endpoint_example": "/api/stock-intelligence/NVDA",
+    }
+
+
 @router.get("/movers")
 def get_stock_movers(
     limit: int = Query(default=24, ge=5, le=40),
@@ -2517,10 +2606,19 @@ def get_stock_movers(
 
     candidates = _ticker_symbols_from_screens(universe, limit)
 
+    discovery_source = "yahoo_predefined_screens"
+
+    if not candidates:
+        candidates = _fallback_mover_candidates(limit)
+        discovery_source = "fallback_liquid_universe"
+
     if not candidates:
         raise HTTPException(
             status_code=503,
-            detail="Yahoo Finance returned no mover candidates.",
+            detail=(
+                "Yahoo Finance returned no mover candidates from either "
+                "predefined screens or the fallback liquid-stock universe."
+            ),
         )
 
     movers: List[Dict[str, Any]] = []
@@ -2548,6 +2646,7 @@ def get_stock_movers(
     payload = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "universe": universe,
+        "discovery_source": discovery_source,
         "candidate_count": len(candidates),
         "count": min(len(movers), limit),
         "movers": movers[:limit],
