@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routers import regime, assets, signals, charts, stocks
 from api.routers.stock_intelligence import router as stock_intelligence_router
+from api.routers.ema_inflection import router as ema_inflection_router
 
 try:
     from api.routers import portfolio
@@ -36,6 +37,7 @@ app.include_router(signals.router,  prefix="/api")
 app.include_router(charts.router,   prefix="/api")
 app.include_router(stocks.router,   prefix="/api")
 app.include_router(stock_intelligence_router)
+app.include_router(ema_inflection_router)
 if portfolio:  app.include_router(portfolio.router, prefix="/api")
 if screener:   app.include_router(screener.router,  prefix="/api")
 if playbook:   app.include_router(playbook.router,  prefix="/api")
