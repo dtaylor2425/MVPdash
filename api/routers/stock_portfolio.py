@@ -1,23 +1,21 @@
 """
 Stock Alpha Portfolio API
 
-FastAPI routes:
+Routes:
     GET /api/stock-portfolio
     GET /api/stock-portfolio/status
 
-Purpose:
-    Build a separate stock-only portfolio from Macro Engine's ranked Stock
-    Intelligence universe.
+This version fixes the two common failure modes from the first stock-portfolio build:
 
-This is separate from the ETF portfolio. The stock portfolio uses the workbook
-scores as the source of conviction, then translates those scores into position
-weights, risk levels, sell triggers, and a trade queue.
+1. Empty holdings when the risk filters are too strict.
+   - The portfolio now has a soft fallback path.
+   - It will still prefer liquid, high-score, trend-supported names.
+   - But it will not return a blank portfolio just because Yahoo data is missing
+     one risk field or because the filter set is temporarily too restrictive.
 
-Core principles:
-    1. The workbook scores decide what deserves capital.
-    2. Volatility-adjusted sizing decides how much capital.
-    3. EMA/ATR rules decide when risk is failing.
-    4. The stock portfolio is separate from the ETF portfolio.
+2. Fragile dependency behavior.
+   - This router still uses the stock_rankings model as the source of truth.
+   - It returns clearer errors if stock_rankings is not installed.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 try:
     from api.routers.stock_rankings import (
@@ -50,12 +48,14 @@ router = APIRouter(
 _CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 CACHE_TTL_SECONDS = 45 * 60
+
 DEFAULT_TARGET_HOLDINGS = 10
-MAX_TARGET_HOLDINGS = 15
 MIN_TARGET_HOLDINGS = 6
+MAX_TARGET_HOLDINGS = 15
+
 MAX_SINGLE_POSITION = 0.12
-MIN_SINGLE_POSITION = 0.025
-MAX_SECTOR_WEIGHT = 0.32
+MIN_SINGLE_POSITION = 0.02
+MAX_SECTOR_WEIGHT = 0.34
 ATR_STOP_MULTIPLE = 2.20
 
 
@@ -107,22 +107,16 @@ def _clean(value: Any, digits: int = 4) -> Any:
     if isinstance(value, float):
         if not math.isfinite(value):
             return None
+
         return round(value, digits)
 
-    if pd.isna(value):
-        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
 
     return value
-
-
-def _safe_divide(numerator: Any, denominator: Any) -> Optional[float]:
-    top = _finite(numerator)
-    bottom = _finite(denominator)
-
-    if top is None or bottom is None or abs(bottom) < 1e-12:
-        return None
-
-    return top / bottom
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -130,6 +124,9 @@ def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
 
 
 def _download_price_history(tickers: Sequence[str]) -> pd.DataFrame:
+    if not tickers:
+        return pd.DataFrame()
+
     try:
         return yf.download(
             tickers=list(tickers),
@@ -151,6 +148,8 @@ def _download_price_history(tickers: Sequence[str]) -> pd.DataFrame:
             group_by="column",
             threads=True,
         )
+    except Exception:
+        return pd.DataFrame()
 
 
 def _slice_ticker_history(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -183,7 +182,7 @@ def _slice_ticker_history(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
         if column not in output.columns:
             return pd.DataFrame()
 
-    return output.dropna(subset=required)
+    return output.dropna(subset=["Close"])
 
 
 def _atr14(data: pd.DataFrame) -> pd.Series:
@@ -205,20 +204,22 @@ def _atr14(data: pd.DataFrame) -> pd.Series:
     return true_range.rolling(14, min_periods=14).mean()
 
 
-def _risk_metrics(history: pd.DataFrame) -> Dict[str, Any]:
-    if history.empty or len(history) < 80:
+def _risk_metrics(history: pd.DataFrame, ranking_row: Dict[str, Any]) -> Dict[str, Any]:
+    fallback_close = _finite(ranking_row.get("close"))
+
+    if history.empty or len(history) < 60:
         return {
-            "close": None,
+            "close": fallback_close,
             "atr14": None,
             "ema21": None,
             "ema50": None,
             "velocity21": None,
-            "annualized_volatility": 0.65,
+            "annualized_volatility": 0.55,
             "dollar_volume_20": None,
             "below_ema21_count": 0,
             "drawdown_from_63d_high": None,
             "stop_level": None,
-            "risk_state": "Unknown",
+            "risk_state": "Data limited",
         }
 
     data = history.copy()
@@ -229,6 +230,7 @@ def _risk_metrics(history: pd.DataFrame) -> Dict[str, Any]:
 
     returns = close.pct_change()
     annualized_volatility = _finite(returns.tail(60).std() * math.sqrt(252))
+
     atr = _atr14(data)
     ema21 = close.ewm(span=21, adjust=False).mean()
     ema50 = close.ewm(span=50, adjust=False).mean()
@@ -273,10 +275,12 @@ def _risk_metrics(history: pd.DataFrame) -> Dict[str, Any]:
         and latest_velocity21 < 0
     ):
         risk_state = "Trend break"
-    elif drawdown is not None and drawdown <= -0.15:
+    elif drawdown is not None and drawdown <= -0.18:
         risk_state = "Drawdown risk"
     elif latest_close is not None and latest_ema21 is not None and latest_close > latest_ema21:
         risk_state = "Trend supported"
+    elif latest_close is not None and latest_ema50 is not None and latest_close > latest_ema50:
+        risk_state = "Base supported"
     else:
         risk_state = "Neutral"
 
@@ -286,7 +290,7 @@ def _risk_metrics(history: pd.DataFrame) -> Dict[str, Any]:
         "ema21": latest_ema21,
         "ema50": latest_ema50,
         "velocity21": latest_velocity21,
-        "annualized_volatility": annualized_volatility or 0.65,
+        "annualized_volatility": annualized_volatility or 0.55,
         "dollar_volume_20": latest_dollar_volume,
         "below_ema21_count": below_ema21_count,
         "drawdown_from_63d_high": drawdown,
@@ -302,287 +306,91 @@ def _calculate_alpha(row: Dict[str, Any], risk: Dict[str, Any]) -> float:
     balance = _finite(row.get("balance_sheet_score")) or 0.0
     valuation = _finite(row.get("valuation_score")) or 0.0
 
-    trend_bonus = 0.0
+    trend_adjustment = 0.0
 
     if risk.get("risk_state") == "Trend supported":
-        trend_bonus += 4
+        trend_adjustment += 4.0
+    elif risk.get("risk_state") == "Base supported":
+        trend_adjustment += 2.0
+    elif risk.get("risk_state") == "Trend break":
+        trend_adjustment -= 8.0
+    elif risk.get("risk_state") == "Drawdown risk":
+        trend_adjustment -= 5.0
 
     velocity21 = _finite(risk.get("velocity21"))
 
     if velocity21 is not None and velocity21 > 0:
-        trend_bonus += 3
-
-    if risk.get("risk_state") in ["Trend break", "Drawdown risk"]:
-        trend_bonus -= 10
+        trend_adjustment += 2.0
 
     alpha = (
-        composite * 0.45
-        + technical * 0.20
+        composite * 0.48
+        + technical * 0.18
         + fundamental * 0.15
         + balance * 0.10
-        + valuation * 0.05
-        + trend_bonus
+        + valuation * 0.06
+        + trend_adjustment
     )
 
     return _clamp(alpha)
 
 
+def _hard_exclusion(row: Dict[str, Any], risk: Dict[str, Any]) -> Optional[str]:
+    close = _finite(risk.get("close")) or _finite(row.get("close"))
+    composite = _finite(row.get("stock_intelligence_score")) or 0.0
+
+    if composite < 50:
+        return "Composite score below hard minimum"
+
+    if close is not None and close < 5:
+        return "Price below hard minimum"
+
+    return None
+
+
 def _eligible(row: Dict[str, Any], risk: Dict[str, Any], min_score: float) -> Tuple[bool, str]:
+    hard_exclusion = _hard_exclusion(row, risk)
+
+    if hard_exclusion:
+        return False, hard_exclusion
+
     composite = _finite(row.get("stock_intelligence_score")) or 0.0
     technical = _finite(row.get("technical_score")) or 0.0
     balance = _finite(row.get("balance_sheet_score")) or 0.0
-    close = _finite(risk.get("close")) or _finite(row.get("close")) or 0.0
-    dollar_volume_20 = _finite(risk.get("dollar_volume_20")) or 0.0
+    dollar_volume_20 = _finite(risk.get("dollar_volume_20"))
 
     if composite < min_score:
         return False, "Composite score below threshold"
 
-    if technical < 50:
-        return False, "Technical score below minimum"
+    if technical < 42:
+        return False, "Technical score below soft minimum"
 
-    if balance < 45:
-        return False, "Balance sheet score below minimum"
+    if balance < 35:
+        return False, "Balance sheet score below soft minimum"
 
-    if close < 10:
-        return False, "Price below liquidity-quality threshold"
-
-    if dollar_volume_20 < 20_000_000:
-        return False, "20D dollar volume below $20M"
-
-    if risk.get("risk_state") == "Trend break":
-        return False, "Trend break risk"
+    if dollar_volume_20 is not None and dollar_volume_20 < 8_000_000:
+        return False, "20D dollar volume below $8M"
 
     return True, "Eligible"
 
 
-def _normalize_with_caps(
-    holdings: List[Dict[str, Any]],
-    target_exposure: float,
-) -> List[Dict[str, Any]]:
-    if not holdings:
-        return []
-
-    for item in holdings:
-        alpha = max(0.01, item["portfolio_alpha"] - 55)
-        volatility = max(0.18, item["annualized_volatility"] or 0.65)
-        item["raw_weight"] = alpha / (volatility ** 2)
-
-    total_raw = sum(item["raw_weight"] for item in holdings)
-
-    if total_raw <= 0:
-        equal_weight = target_exposure / len(holdings)
-
-        for item in holdings:
-            item["target_weight"] = equal_weight
-
-        return holdings
-
-    for item in holdings:
-        item["target_weight"] = target_exposure * item["raw_weight"] / total_raw
-
-    # Position caps.
-    for _ in range(8):
-        excess = 0.0
-        uncapped = []
-
-        for item in holdings:
-            if item["target_weight"] > MAX_SINGLE_POSITION:
-                excess += item["target_weight"] - MAX_SINGLE_POSITION
-                item["target_weight"] = MAX_SINGLE_POSITION
-            else:
-                uncapped.append(item)
-
-        if excess <= 1e-8 or not uncapped:
-            break
-
-        uncapped_total = sum(item["target_weight"] for item in uncapped)
-
-        if uncapped_total <= 0:
-            break
-
-        for item in uncapped:
-            item["target_weight"] += excess * item["target_weight"] / uncapped_total
-
-    # Sector caps.
-    for _ in range(6):
-        sector_weights: Dict[str, float] = {}
-
-        for item in holdings:
-            sector = item.get("sector") or "Unknown"
-            sector_weights[sector] = sector_weights.get(sector, 0.0) + item["target_weight"]
-
-        excess = 0.0
-
-        for sector, weight in sector_weights.items():
-            if weight <= MAX_SECTOR_WEIGHT:
-                continue
-
-            trim_ratio = MAX_SECTOR_WEIGHT / weight
-            for item in holdings:
-                if item.get("sector") == sector:
-                    old_weight = item["target_weight"]
-                    item["target_weight"] = old_weight * trim_ratio
-                    excess += old_weight - item["target_weight"]
-
-        receivers = [
-            item
-            for item in holdings
-            if sector_weights.get(item.get("sector") or "Unknown", 0.0) < MAX_SECTOR_WEIGHT
-            and item["target_weight"] < MAX_SINGLE_POSITION
-        ]
-
-        if excess <= 1e-8 or not receivers:
-            break
-
-        receiver_total = sum(item["target_weight"] for item in receivers)
-
-        if receiver_total <= 0:
-            break
-
-        for item in receivers:
-            item["target_weight"] += excess * item["target_weight"] / receiver_total
-            item["target_weight"] = min(item["target_weight"], MAX_SINGLE_POSITION)
-
-    # Drop tiny weights and renormalize remaining weights to target exposure.
-    holdings = [
-        item
-        for item in holdings
-        if item["target_weight"] >= MIN_SINGLE_POSITION
-    ]
-
-    total_weight = sum(item["target_weight"] for item in holdings)
-
-    if total_weight > 0:
-        scale = target_exposure / total_weight
-
-        for item in holdings:
-            item["target_weight"] *= scale
-            item["target_weight"] = min(item["target_weight"], MAX_SINGLE_POSITION)
-
-    return holdings
-
-
-def _stock_exposure(top_rows: List[Dict[str, Any]]) -> Tuple[float, str]:
-    if not top_rows:
-        return 0.0, "No qualifying stock exposure"
-
-    avg_score = sum(
-        _finite(row.get("stock_intelligence_score")) or 0.0
-        for row in top_rows
-    ) / len(top_rows)
-
-    avg_technical = sum(
-        _finite(row.get("technical_score")) or 0.0
-        for row in top_rows
-    ) / len(top_rows)
-
-    favored_count = sum(
-        1
-        for row in top_rows
-        if (_finite(row.get("stock_intelligence_score")) or 0.0) >= 75
-    )
-
-    if avg_score >= 76 and avg_technical >= 65 and favored_count >= 6:
-        return 0.95, "Full stock risk"
-
-    if avg_score >= 70 and avg_technical >= 60 and favored_count >= 4:
-        return 0.88, "Constructive stock risk"
-
-    if avg_score >= 64 and avg_technical >= 55:
-        return 0.72, "Moderate stock risk"
-
-    return 0.55, "Reduced stock risk"
-
-
-def _action_for_holding(item: Dict[str, Any]) -> str:
-    score = _finite(item.get("stock_intelligence_score")) or 0.0
-    technical = _finite(item.get("technical_score")) or 0.0
-    risk_state = item.get("risk_state")
-
-    if risk_state == "Trend break":
-        return "Sell"
-
-    if score < 60 or technical < 45:
-        return "Sell"
-
-    if risk_state == "Drawdown risk":
-        return "Trim"
-
-    if item.get("rank", 999) <= 5 and score >= 75 and technical >= 60:
-        return "Buy"
-
-    if score >= 68 and technical >= 55:
-        return "Hold"
-
-    return "Watch"
-
-
-def _trade_reason(item: Dict[str, Any]) -> str:
-    action = item.get("action")
-
-    if action == "Buy":
-        return "Top-ranked workbook profile with enough technical support to take risk."
-
-    if action == "Hold":
-        return "Score remains inside the target portfolio range."
-
-    if action == "Trim":
-        return "Ranking still qualifies, but price risk has increased."
-
-    if action == "Sell":
-        return "Score or trend risk has broken the portfolio rules."
-
-    return "Needs either a stronger score or cleaner price confirmation."
-
-
-def _build_portfolio(
-    universe: str,
-    tickers: Optional[str],
-    max_tickers: int,
-    target_holdings: int,
+def _build_candidate_items(
+    ranking_rows: List[Dict[str, Any]],
+    price_frame: pd.DataFrame,
     min_score: float,
-) -> Dict[str, Any]:
-    if _rankings_get_universe is None or _rankings_scan is None:
-        raise RuntimeError(
-            "api.routers.stock_rankings is required before stock_portfolio can run."
-        )
-
-    target_holdings = max(
-        MIN_TARGET_HOLDINGS,
-        min(MAX_TARGET_HOLDINGS, target_holdings),
-    )
-
-    universe_key, ticker_list = _rankings_get_universe(
-        universe=universe,
-        tickers=tickers,
-        max_tickers=max_tickers,
-    )
-
-    ranking_payload = _rankings_scan(
-        universe_key=universe_key,
-        tickers=ticker_list,
-        limit=max(35, target_holdings * 3),
-        min_score=0,
-    )
-
-    ranking_rows = ranking_payload.get("rows", [])
-
-    tickers_for_history = [
-        row["ticker"]
-        for row in ranking_rows
-        if row.get("ticker")
-    ]
-
-    price_frame = _download_price_history(tickers_for_history)
-
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     candidates = []
+    rejected = []
 
     for index, row in enumerate(ranking_rows):
         ticker = row.get("ticker")
-        history = _slice_ticker_history(price_frame, ticker)
-        risk = _risk_metrics(history)
 
-        is_eligible, eligibility_reason = _eligible(
+        if not ticker:
+            continue
+
+        history = _slice_ticker_history(price_frame, ticker)
+        risk = _risk_metrics(history, row)
+
+        eligible, reason = _eligible(
             row=row,
             risk=risk,
             min_score=min_score,
@@ -594,25 +402,332 @@ def _build_portfolio(
             **row,
             **risk,
             "rank": index + 1,
-            "eligible": is_eligible,
-            "eligibility_reason": eligibility_reason,
+            "eligible": eligible,
+            "eligibility_reason": reason,
             "portfolio_alpha": alpha,
         }
 
-        if is_eligible:
+        if eligible:
             candidates.append(item)
+        else:
+            rejected.append(item)
 
-    candidates.sort(
-        key=lambda item: item.get("portfolio_alpha") or 0.0,
+    return candidates, rejected
+
+
+def _fallback_candidates(
+    rejected: List[Dict[str, Any]],
+    target_holdings: int,
+) -> List[Dict[str, Any]]:
+    fallback = []
+
+    for item in rejected:
+        hard_exclusion = _hard_exclusion(item, item)
+
+        if hard_exclusion:
+            continue
+
+        item = {
+            **item,
+            "eligible": True,
+            "eligibility_reason": (
+                "Fallback inclusion: top-ranked workbook profile, but one "
+                "portfolio filter was incomplete or temporarily failed."
+            ),
+        }
+
+        fallback.append(item)
+
+    fallback.sort(
+        key=lambda item: (
+            _finite(item.get("stock_intelligence_score")) or 0.0,
+            _finite(item.get("portfolio_alpha")) or 0.0,
+        ),
         reverse=True,
     )
 
+    return fallback[:target_holdings]
+
+
+def _stock_exposure(holdings: List[Dict[str, Any]]) -> Tuple[float, str]:
+    if not holdings:
+        return 0.0, "No qualifying stock exposure"
+
+    average_score = sum(
+        _finite(item.get("stock_intelligence_score")) or 0.0
+        for item in holdings
+    ) / len(holdings)
+
+    average_technical = sum(
+        _finite(item.get("technical_score")) or 0.0
+        for item in holdings
+    ) / len(holdings)
+
+    if average_score >= 76 and average_technical >= 62:
+        return 0.95, "Full stock risk"
+
+    if average_score >= 70 and average_technical >= 57:
+        return 0.88, "Constructive stock risk"
+
+    if average_score >= 63:
+        return 0.74, "Moderate stock risk"
+
+    return 0.58, "Reduced stock risk"
+
+
+def _normalize_with_caps(
+    holdings: List[Dict[str, Any]],
+    target_exposure: float,
+) -> List[Dict[str, Any]]:
+    if not holdings:
+        return []
+
+    for item in holdings:
+        alpha_edge = max(0.01, (_finite(item.get("portfolio_alpha")) or 55.0) - 55.0)
+        volatility = max(0.18, _finite(item.get("annualized_volatility")) or 0.55)
+        item["raw_weight"] = alpha_edge / (volatility ** 2)
+
+    raw_total = sum(_finite(item.get("raw_weight")) or 0.0 for item in holdings)
+
+    if raw_total <= 0:
+        equal_weight = target_exposure / len(holdings)
+
+        for item in holdings:
+            item["target_weight"] = equal_weight
+    else:
+        for item in holdings:
+            item["target_weight"] = target_exposure * item["raw_weight"] / raw_total
+
+    for _ in range(8):
+        excess = 0.0
+        receivers = []
+
+        for item in holdings:
+            weight = _finite(item.get("target_weight")) or 0.0
+
+            if weight > MAX_SINGLE_POSITION:
+                item["target_weight"] = MAX_SINGLE_POSITION
+                excess += weight - MAX_SINGLE_POSITION
+            else:
+                receivers.append(item)
+
+        if excess <= 1e-8 or not receivers:
+            break
+
+        receiver_total = sum(_finite(item.get("target_weight")) or 0.0 for item in receivers)
+
+        if receiver_total <= 0:
+            break
+
+        for item in receivers:
+            current = _finite(item.get("target_weight")) or 0.0
+            item["target_weight"] = current + excess * current / receiver_total
+
+    # Sector caps. This is intentionally soft. It reduces concentration without
+    # forcing the portfolio blank.
+    for _ in range(5):
+        sector_weights: Dict[str, float] = {}
+
+        for item in holdings:
+            sector = item.get("sector") or "Unknown"
+            sector_weights[sector] = sector_weights.get(sector, 0.0) + (_finite(item.get("target_weight")) or 0.0)
+
+        excess = 0.0
+
+        for sector, weight in sector_weights.items():
+            if weight <= MAX_SECTOR_WEIGHT:
+                continue
+
+            trim_ratio = MAX_SECTOR_WEIGHT / weight
+
+            for item in holdings:
+                if (item.get("sector") or "Unknown") == sector:
+                    old_weight = _finite(item.get("target_weight")) or 0.0
+                    item["target_weight"] = old_weight * trim_ratio
+                    excess += old_weight - item["target_weight"]
+
+        receivers = [
+            item
+            for item in holdings
+            if sector_weights.get(item.get("sector") or "Unknown", 0.0) < MAX_SECTOR_WEIGHT
+            and (_finite(item.get("target_weight")) or 0.0) < MAX_SINGLE_POSITION
+        ]
+
+        if excess <= 1e-8 or not receivers:
+            break
+
+        receiver_total = sum(_finite(item.get("target_weight")) or 0.0 for item in receivers)
+
+        if receiver_total <= 0:
+            break
+
+        for item in receivers:
+            current = _finite(item.get("target_weight")) or 0.0
+            item["target_weight"] = min(
+                MAX_SINGLE_POSITION,
+                current + excess * current / receiver_total,
+            )
+
+    holdings = [
+        item
+        for item in holdings
+        if (_finite(item.get("target_weight")) or 0.0) >= MIN_SINGLE_POSITION
+    ]
+
+    weight_total = sum(_finite(item.get("target_weight")) or 0.0 for item in holdings)
+
+    if weight_total > 0:
+        scale = target_exposure / weight_total
+
+        for item in holdings:
+            item["target_weight"] = min(
+                MAX_SINGLE_POSITION,
+                (_finite(item.get("target_weight")) or 0.0) * scale,
+            )
+
+    return holdings
+
+
+def _action_for_holding(item: Dict[str, Any]) -> str:
+    score = _finite(item.get("stock_intelligence_score")) or 0.0
+    technical = _finite(item.get("technical_score")) or 0.0
+    risk_state = item.get("risk_state")
+
+    if risk_state == "Trend break" or technical < 45 or score < 58:
+        return "Watch"
+
+    if risk_state == "Drawdown risk":
+        return "Trim"
+
+    if item.get("portfolio_rank", 999) <= 5 and score >= 72 and technical >= 55:
+        return "Buy"
+
+    if score >= 65:
+        return "Hold"
+
+    return "Watch"
+
+
+def _trade_reason(item: Dict[str, Any]) -> str:
+    action = item.get("action")
+
+    if action == "Buy":
+        return "Top-ranked workbook profile with enough technical support to take stock risk."
+
+    if action == "Hold":
+        return "Score remains inside the target stock portfolio range."
+
+    if action == "Trim":
+        return "Still qualifies, but drawdown or trend risk has increased."
+
+    if action == "Sell":
+        return "Score or trend risk has broken portfolio rules."
+
+    return "Keep on the watchlist until score or trend confirmation improves."
+
+
+def _build_portfolio(
+    universe: str,
+    tickers: Optional[str],
+    max_tickers: int,
+    target_holdings: int,
+    min_score: float,
+) -> Dict[str, Any]:
+    if _rankings_get_universe is None or _rankings_scan is None:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Stock portfolio requires api/routers/stock_rankings.py. "
+                "Deploy stock_rankings.py and include it in api/main.py first."
+            ),
+        )
+
+    target_holdings = max(
+        MIN_TARGET_HOLDINGS,
+        min(MAX_TARGET_HOLDINGS, int(target_holdings)),
+    )
+
+    universe_key, ticker_list = _rankings_get_universe(
+        universe=universe,
+        tickers=tickers,
+        max_tickers=max_tickers,
+    )
+
+    ranking_payload = _rankings_scan(
+        universe_key=universe_key,
+        tickers=ticker_list,
+        limit=max(40, target_holdings * 4),
+        min_score=0,
+    )
+
+    ranking_rows = ranking_payload.get("rows", [])
+
+    if not ranking_rows:
+        return {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "cache_ttl_seconds": CACHE_TTL_SECONDS,
+            "portfolio_type": "stock_alpha",
+            "universe": universe_key,
+            "requested_tickers": len(ticker_list),
+            "ranked_candidates": 0,
+            "eligible_candidates": 0,
+            "target_holdings": target_holdings,
+            "stock_exposure": 0.0,
+            "cash_weight": 1.0,
+            "exposure_regime": "No ranking data",
+            "holdings": [],
+            "sector_weights": {},
+            "trade_queue": [],
+            "diagnostics": {
+                "reason": (
+                    "The stock rankings API returned no rows. Test "
+                    "/api/stock-rankings?refresh=true directly."
+                ),
+            },
+        }
+
+    history_tickers = [
+        row["ticker"]
+        for row in ranking_rows
+        if row.get("ticker")
+    ]
+
+    price_frame = _download_price_history(history_tickers)
+
+    candidates, rejected = _build_candidate_items(
+        ranking_rows=ranking_rows,
+        price_frame=price_frame,
+        min_score=min_score,
+    )
+
+    candidates.sort(
+        key=lambda item: _finite(item.get("portfolio_alpha")) or 0.0,
+        reverse=True,
+    )
+
+    used_fallback = False
+
+    if len(candidates) < max(3, min(target_holdings, 6)):
+        fallback = _fallback_candidates(
+            rejected=rejected,
+            target_holdings=target_holdings,
+        )
+
+        existing = {item.get("ticker") for item in candidates}
+
+        for item in fallback:
+            if item.get("ticker") not in existing:
+                candidates.append(item)
+
+        used_fallback = True
+
     selected = candidates[:target_holdings]
-    stock_exposure, exposure_regime = _stock_exposure(selected)
-    holdings = _normalize_with_caps(selected, stock_exposure)
+
+    exposure, exposure_regime = _stock_exposure(selected)
+    holdings = _normalize_with_caps(selected, exposure)
 
     holdings.sort(
-        key=lambda item: item.get("target_weight") or 0.0,
+        key=lambda item: _finite(item.get("target_weight")) or 0.0,
         reverse=True,
     )
 
@@ -621,26 +736,22 @@ def _build_portfolio(
         item["action"] = _action_for_holding(item)
         item["trade_reason"] = _trade_reason(item)
         item["sell_trigger"] = (
-            "Sell if composite < 60, technical < 45, or close stays below EMA21 "
-            "for 3 days while Velocity21 is negative."
+            "Review or remove if composite < 60, technical < 45, or price "
+            "stays below EMA21 for 3 sessions while Velocity21 is negative."
         )
         item["add_trigger"] = (
             "Add only if the stock remains top ranked and price stays above EMA21."
         )
-        item["hold_window"] = (
-            "8 to 12 weeks for quality leaders; review weekly."
-        )
+        item["hold_window"] = "8 to 12 weeks for quality leaders; review weekly."
 
-    cash_weight = max(
-        0.0,
-        1.0 - sum(item.get("target_weight") or 0.0 for item in holdings),
-    )
+    invested_weight = sum(_finite(item.get("target_weight")) or 0.0 for item in holdings)
+    cash_weight = max(0.0, 1.0 - invested_weight)
 
     sector_weights: Dict[str, float] = {}
 
     for item in holdings:
         sector = item.get("sector") or "Unknown"
-        sector_weights[sector] = sector_weights.get(sector, 0.0) + (item.get("target_weight") or 0.0)
+        sector_weights[sector] = sector_weights.get(sector, 0.0) + (_finite(item.get("target_weight")) or 0.0)
 
     trade_queue = [
         {
@@ -652,13 +763,11 @@ def _build_portfolio(
             "reason": item.get("trade_reason"),
         }
         for item in holdings
-        if item.get("action") in ["Buy", "Trim", "Sell", "Watch"]
+        if item.get("action") in ["Buy", "Trim", "Watch", "Sell"]
     ]
 
-    generated_at = datetime.utcnow().isoformat() + "Z"
-
     return {
-        "generated_at": generated_at,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
         "cache_ttl_seconds": CACHE_TTL_SECONDS,
         "portfolio_type": "stock_alpha",
         "universe": universe_key,
@@ -666,14 +775,15 @@ def _build_portfolio(
         "ranked_candidates": len(ranking_rows),
         "eligible_candidates": len(candidates),
         "target_holdings": target_holdings,
-        "stock_exposure": stock_exposure,
+        "stock_exposure": exposure,
         "cash_weight": cash_weight,
         "exposure_regime": exposure_regime,
+        "used_fallback": used_fallback,
         "holdings": [
             {
                 key: _clean(value)
                 for key, value in item.items()
-                if key not in ["raw_weight"]
+                if key != "raw_weight"
             }
             for item in holdings
         ],
@@ -692,6 +802,18 @@ def _build_portfolio(
             }
             for item in trade_queue
         ],
+        "diagnostics": {
+            "ranking_rows": len(ranking_rows),
+            "initial_eligible_candidates": len([
+                item for item in candidates if item.get("eligibility_reason") == "Eligible"
+            ]),
+            "rejected_candidates": len(rejected),
+            "used_fallback": used_fallback,
+            "note": (
+                "Fallback is used when strict filters leave too few holdings. "
+                "This prevents blank portfolios while still using workbook rank as the source of truth."
+            ),
+        },
         "risk_rules": {
             "max_single_position": MAX_SINGLE_POSITION,
             "max_sector_weight": MAX_SECTOR_WEIGHT,
@@ -702,21 +824,12 @@ def _build_portfolio(
                 "Close below EMA21 for 3 sessions with negative Velocity21",
                 "Trend break risk state",
             ],
-            "trim": [
-                "Drawdown risk state",
-                "Position exceeds max weight",
-                "Score falls while price keeps rising",
-            ],
             "rebalance": "Weekly target rebalance; daily risk checks.",
         },
         "methodology": {
             "objective": (
                 "Maximize expected stock alpha while penalizing volatility, "
                 "concentration, and trend-break risk."
-            ),
-            "ranking_signal": (
-                "Stock Intelligence Score, technical support, fundamentals, "
-                "balance sheet strength, valuation, and price risk."
             ),
             "sizing": (
                 "weight_i is proportional to portfolio_alpha_edge divided by "
@@ -731,13 +844,13 @@ def _build_portfolio(
 def get_stock_portfolio(
     universe: str = Query(default="quality"),
     target_holdings: int = Query(default=DEFAULT_TARGET_HOLDINGS, ge=MIN_TARGET_HOLDINGS, le=MAX_TARGET_HOLDINGS),
-    min_score: float = Query(default=65, ge=0, le=100),
+    min_score: float = Query(default=60, ge=0, le=100),
     max_tickers: int = Query(default=95, ge=20, le=160),
     refresh: bool = Query(default=False),
     tickers: Optional[str] = Query(default=None),
 ) -> Dict[str, Any]:
     cache_key = (
-        f"stock-portfolio:{universe}:{target_holdings}:{min_score}:"
+        f"stock-portfolio-v2:{universe}:{target_holdings}:{min_score}:"
         f"{max_tickers}:{tickers or ''}"
     )
 
@@ -765,6 +878,8 @@ def get_stock_portfolio(
 
 @router.get("/status")
 def get_stock_portfolio_status() -> Dict[str, Any]:
+    rankings_available = _rankings_get_universe is not None and _rankings_scan is not None
+
     return {
         "status": "ok",
         "route": "/api/stock-portfolio",
@@ -773,4 +888,10 @@ def get_stock_portfolio_status() -> Dict[str, Any]:
         "max_single_position": MAX_SINGLE_POSITION,
         "max_sector_weight": MAX_SECTOR_WEIGHT,
         "requires": "/api/stock-rankings",
+        "stock_rankings_imported": rankings_available,
+        "fixes": [
+            "Soft fallback prevents blank holdings",
+            "Lower default min_score from 65 to 60",
+            "Missing Yahoo risk data no longer rejects a top-ranked workbook stock",
+        ],
     }
