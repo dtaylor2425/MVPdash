@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix="/api/stock-rankings", tags=["stock-rankings"])
 _CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -320,3 +320,39 @@ def get_stock_rankings(
 @router.get('/status')
 def get_stock_rankings_status() -> Dict[str, Any]:
     return {'status':'ok', 'route':'/api/stock-rankings', 'cache_ttl_seconds':CACHE_TTL_SECONDS, 'universes':sorted(UNIVERSES.keys()), 'default_universe':'quality', 'weights':{'fundamental_score':35, 'technical_score':30, 'balance_sheet_score':20, 'valuation_score':10, 'momentum_quality_score':5}}
+
+
+@router.get("/{ticker}")
+def get_single_stock_ranking(
+    ticker: str,
+    refresh: bool = Query(default=False),
+) -> Dict[str, Any]:
+    symbol = _clean_ticker(ticker)
+
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Ticker is required.")
+
+    payload = get_stock_rankings(
+        universe="quality",
+        limit=10,
+        min_score=0,
+        max_tickers=10,
+        refresh=refresh,
+        tickers=symbol,
+    )
+
+    rows = payload.get("rows") or []
+
+    for row in rows:
+        if row.get("ticker") == symbol:
+            return {
+                "generated_at": payload.get("generated_at"),
+                "cached": payload.get("cached", False),
+                "ranking": row,
+                "methodology": payload.get("methodology"),
+            }
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"No ranking data available for {symbol}.",
+    )
