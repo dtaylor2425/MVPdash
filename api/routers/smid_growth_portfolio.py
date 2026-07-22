@@ -1,25 +1,26 @@
 
 """
-High-Growth SMID Portfolio API
+Timeout-safe High-Growth SMID Portfolio API
 
 Routes:
     GET /api/smid-growth-portfolio
     GET /api/smid-growth-portfolio/status
 
-Separate small/mid-cap growth portfolio focused on:
-- revenue and EPS acceleration
-- margin and FCF inflection
-- balance sheet survivability
-- under-discovered sponsorship
-- Stage 2 / base breakout technicals
-- relative strength and momentum acceleration
-- valuation relative to growth
+This version is designed to avoid 5-minute browser/Railway timeouts.
+
+Main changes:
+    1. Fast technical pre-scan first.
+    2. Fundamentals are fetched only for the strongest technical candidates.
+    3. Fundamentals fetch has a hard time budget.
+    4. Missing fundamentals fall back to neutral scores instead of blocking.
+    5. Cached responses return instantly.
 """
 
 from __future__ import annotations
 
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -30,18 +31,23 @@ from fastapi import APIRouter, Query
 
 router = APIRouter(prefix="/api/smid-growth-portfolio", tags=["smid-growth-portfolio"])
 
-_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 CACHE_TTL_SECONDS = 60 * 60
-BENCHMARK_TICKER = "SPY"
+_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
+BENCHMARK_TICKER = "SPY"
 DEFAULT_TARGET_HOLDINGS = 15
 MIN_TARGET_HOLDINGS = 10
 MAX_TARGET_HOLDINGS = 20
 
-MIN_MARKET_CAP = 300_000_000
-MAX_MARKET_CAP = 25_000_000_000
+DEFAULT_MAX_TICKERS = 60
+MAX_FUNDAMENTAL_FETCH = 30
+FUNDAMENTAL_TIME_BUDGET_SECONDS = 32
+MAX_WORKERS = 8
+
 MIN_PRICE = 5
-MIN_DOLLAR_VOLUME_20 = 5_000_000
+MIN_DOLLAR_VOLUME_20 = 4_000_000
+MIN_MARKET_CAP = 300_000_000
+MAX_MARKET_CAP = 35_000_000_000
 
 MAX_SINGLE_POSITION = 0.085
 MAX_SECTOR_WEIGHT = 0.30
@@ -52,37 +58,33 @@ TRANSACTION_COST_BPS = 18
 SMID_GROWTH_UNIVERSE = [
     "CRDO", "ALAB", "AEHR", "ACMR", "AMBA", "ARLO", "ARRY", "BE", "BILL",
     "CAMT", "CLS", "COHR", "COMM", "ENVX", "FORM", "FSLY", "GCT", "IOT",
-    "LITE", "MRAM", "NXT", "ONTO", "POWI", "PDFS", "PI", "QLYS", "RELY",
-    "SITM", "SOUN", "TER", "TSEM", "UCTT", "VICR", "VRT", "WOLF",
-    "AI", "APP", "BBAI", "CFLT", "COUR", "DBX", "DOCN", "DUOL", "ESTC",
-    "FIVN", "FRSH", "GTLB", "HCP", "JAMF", "KVYO", "MNDY", "NCNO", "NET",
-    "PATH", "PAY", "PCOR", "RBLX", "RDDT", "S", "SEMR", "TOST", "TTD",
-    "U", "YOU", "ZI", "ZM", "ZS",
-    "AFRM", "BTDR", "CLSK", "COIN", "DAVE", "FOUR", "HOOD", "HUT", "IREN",
-    "MARA", "NU", "PAYO", "RIOT", "ROOT", "SOFI", "UPST", "WULF",
-    "BROS", "CAVA", "CELH", "CHWY", "CROX", "DECK", "ELF", "HIMS", "LTH",
-    "ONON", "PRCH", "SG", "SHAK", "SKX", "SFM", "WING", "YETI",
-    "ACLX", "AKRO", "ALKS", "ARDX", "AXSM", "BEAM", "CRSP", "DAWN", "EWTX",
-    "EXAS", "FOLD", "HALO", "INSM", "IOVA", "MIRM", "NARI", "PRAX", "REPL",
-    "RXRX", "SANA", "TMDX", "TWST", "VKTX", "VIR", "XENE",
-    "ACHR", "ASTS", "AVAV", "BKSY", "IONQ", "JOBY", "LUNR", "MRCY", "OUST",
-    "PL", "QBTS", "RKLB", "RGTI", "SPCE",
-    "ALTM", "AMPS", "BLDP", "CCJ", "ENPH", "FLNC", "FSLR", "LEU", "MP",
-    "NFE", "NNE", "NOVA", "OKLO", "RUN", "SEDG", "SMR", "STEM",
-    "AA", "ATI", "AXON", "BOOT", "CENX", "CLF", "CWST", "ESAB", "FCX",
-    "FIX", "FLR", "HWM", "IESC", "KAI", "KALU", "LNTH", "MTRN", "NVT",
-    "PARR", "PRIM", "STRL", "SYM", "TGLS", "TREX", "TROX", "UFPI",
+    "LITE", "MRAM", "NXT", "ONTO", "PDFS", "PI", "QLYS", "RELY", "SITM",
+    "SOUN", "TER", "TSEM", "UCTT", "VICR", "VRT", "WOLF", "AI", "APP",
+    "BBAI", "CFLT", "COUR", "DBX", "DOCN", "DUOL", "ESTC", "FIVN", "FRSH",
+    "GTLB", "HCP", "JAMF", "KVYO", "MNDY", "NCNO", "NET", "PATH", "PAY",
+    "PCOR", "RBLX", "RDDT", "S", "SEMR", "TOST", "TTD", "U", "YOU", "ZI",
+    "ZM", "ZS", "AFRM", "BTDR", "CLSK", "COIN", "DAVE", "FOUR", "HOOD",
+    "HUT", "IREN", "MARA", "NU", "PAYO", "RIOT", "ROOT", "SOFI", "UPST",
+    "WULF", "BROS", "CAVA", "CELH", "CHWY", "CROX", "DECK", "ELF", "HIMS",
+    "LTH", "ONON", "SG", "SHAK", "SKX", "SFM", "WING", "YETI", "ACLX",
+    "AKRO", "ALKS", "ARDX", "AXSM", "BEAM", "CRSP", "EXAS", "HALO", "INSM",
+    "IOVA", "NARI", "RXRX", "TMDX", "TWST", "VKTX", "XENE", "ACHR", "ASTS",
+    "AVAV", "BKSY", "IONQ", "JOBY", "LUNR", "MRCY", "OUST", "PL", "QBTS",
+    "RKLB", "RGTI", "ALTM", "CCJ", "ENPH", "FLNC", "FSLR", "LEU", "MP",
+    "NNE", "OKLO", "RUN", "SMR", "STEM", "AA", "ATI", "AXON", "BOOT",
+    "CENX", "CLF", "CWST", "ESAB", "FIX", "FLR", "HWM", "IESC", "KAI",
+    "KALU", "LNTH", "MTRN", "PARR", "PRIM", "STRL", "SYM", "TGLS", "TREX"
 ]
 
 THEME_MAP = {
-    "AI infrastructure": ["CRDO", "ALAB", "AEHR", "ACMR", "AMBA", "ARLO", "CAMT", "COHR", "FORM", "LITE", "MRAM", "ONTO", "PDFS", "PI", "SITM", "VICR", "VRT"],
-    "Software": ["AI", "APP", "CFLT", "COUR", "DBX", "DOCN", "DUOL", "ESTC", "FIVN", "FRSH", "GTLB", "IOT", "JAMF", "KVYO", "MNDY", "NCNO", "NET", "PATH", "PAY", "PCOR", "RBLX", "RDDT", "S", "SEMR", "TOST", "TTD", "U", "YOU", "ZI", "ZM", "ZS"],
-    "Fintech and crypto": ["AFRM", "BILL", "BTDR", "CLSK", "COIN", "DAVE", "FOUR", "HOOD", "HUT", "IREN", "MARA", "NU", "PAYO", "RIOT", "ROOT", "SOFI", "UPST", "WULF"],
-    "Consumer growth": ["BROS", "CAVA", "CELH", "CHWY", "CROX", "DECK", "ELF", "HIMS", "LTH", "ONON", "PRCH", "SG", "SHAK", "SKX", "SFM", "WING", "YETI"],
-    "Biotech and medtech": ["ACLX", "AKRO", "ALKS", "ARDX", "AXSM", "BEAM", "CRSP", "DAWN", "EWTX", "EXAS", "FOLD", "HALO", "INSM", "IOVA", "MIRM", "NARI", "PRAX", "REPL", "RXRX", "SANA", "TMDX", "TWST", "VKTX", "VIR", "XENE"],
-    "Frontier tech": ["ACHR", "ASTS", "AVAV", "BKSY", "IONQ", "JOBY", "LUNR", "MRCY", "OUST", "PL", "QBTS", "RKLB", "RGTI", "SPCE"],
-    "Energy transition": ["ALTM", "AMPS", "BLDP", "CCJ", "ENPH", "FLNC", "FSLR", "LEU", "MP", "NFE", "NNE", "NOVA", "OKLO", "RUN", "SEDG", "SMR", "STEM"],
-    "Industrial growth": ["AA", "ATI", "AXON", "BOOT", "CENX", "CLF", "CWST", "ESAB", "FCX", "FIX", "FLR", "HWM", "IESC", "KAI", "KALU", "LNTH", "MTRN", "NVT", "PARR", "PRIM", "STRL", "SYM", "TGLS", "TREX", "TROX", "UFPI"],
+    "AI infrastructure": ["CRDO", "ALAB", "AEHR", "ACMR", "AMBA", "CAMT", "COHR", "FORM", "LITE", "ONTO", "PDFS", "PI", "SITM", "VICR", "VRT"],
+    "Software": ["AI", "APP", "CFLT", "DBX", "DOCN", "DUOL", "ESTC", "FRSH", "GTLB", "IOT", "MNDY", "NET", "PATH", "PCOR", "RDDT", "S", "TOST", "TTD", "U", "ZS"],
+    "Fintech and crypto": ["AFRM", "BTDR", "CLSK", "COIN", "DAVE", "FOUR", "HOOD", "HUT", "IREN", "MARA", "NU", "PAYO", "RIOT", "ROOT", "SOFI", "UPST", "WULF"],
+    "Consumer growth": ["BROS", "CAVA", "CELH", "CHWY", "CROX", "DECK", "ELF", "HIMS", "ONON", "SG", "SHAK", "SFM", "WING"],
+    "Biotech and medtech": ["ACLX", "AKRO", "ALKS", "ARDX", "AXSM", "BEAM", "CRSP", "EXAS", "HALO", "INSM", "IOVA", "NARI", "RXRX", "TMDX", "TWST", "VKTX", "XENE"],
+    "Frontier tech": ["ACHR", "ASTS", "AVAV", "BKSY", "IONQ", "JOBY", "LUNR", "MRCY", "OUST", "PL", "QBTS", "RKLB", "RGTI"],
+    "Energy transition": ["ALTM", "CCJ", "ENPH", "FLNC", "FSLR", "LEU", "MP", "NNE", "OKLO", "RUN", "SMR", "STEM"],
+    "Industrial growth": ["AA", "ATI", "AXON", "BOOT", "CENX", "CLF", "CWST", "ESAB", "FIX", "FLR", "HWM", "IESC", "KAI", "KALU", "LNTH", "MTRN", "PARR", "PRIM", "STRL", "SYM", "TGLS", "TREX"],
 }
 
 
@@ -117,6 +119,16 @@ def _clean(value: Any, digits: int = 4) -> Any:
     return value
 
 
+def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    return max(low, min(high, value))
+
+
+def _score_linear(value: Optional[float], low: float, high: float, missing: float = 50.0) -> float:
+    if value is None or high == low:
+        return missing
+    return _clamp(100 * (value - low) / (high - low))
+
+
 def _safe_divide(numerator: Any, denominator: Any) -> Optional[float]:
     top = _finite(numerator)
     bottom = _finite(denominator)
@@ -125,21 +137,20 @@ def _safe_divide(numerator: Any, denominator: Any) -> Optional[float]:
     return top / bottom
 
 
-def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, value))
+def _cache_get(key: str) -> Optional[Dict[str, Any]]:
+    item = _CACHE.get(key)
+    if not item:
+        return None
+    expires_at, payload = item
+    if time.time() >= expires_at:
+        _CACHE.pop(key, None)
+        return None
+    return payload
 
 
-def _score_linear(value: Optional[float], low: float, high: float, missing: float = 45.0) -> float:
-    if value is None or high == low:
-        return missing
-    return _clamp(100 * (value - low) / (high - low))
-
-
-def _ticker_theme(ticker: str) -> str:
-    for theme, tickers in THEME_MAP.items():
-        if ticker in tickers:
-            return theme
-    return "Other SMID growth"
+def _cache_set(key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _CACHE[key] = (time.time() + CACHE_TTL_SECONDS, payload)
+    return payload
 
 
 def _dedupe(tickers: Sequence[str]) -> List[str]:
@@ -159,6 +170,13 @@ def _parse_custom_tickers(value: Optional[str]) -> List[str]:
     return _dedupe(value.replace("\n", ",").replace(" ", ",").split(","))
 
 
+def _ticker_theme(ticker: str) -> str:
+    for theme, tickers in THEME_MAP.items():
+        if ticker in tickers:
+            return theme
+    return "Other SMID growth"
+
+
 def _get_universe(tickers: Optional[str], max_tickers: int) -> Tuple[str, List[str]]:
     custom = _parse_custom_tickers(tickers)
     if custom:
@@ -166,24 +184,8 @@ def _get_universe(tickers: Optional[str], max_tickers: int) -> Tuple[str, List[s
     return "high_growth_smid", _dedupe(SMID_GROWTH_UNIVERSE)[:max_tickers]
 
 
-def _cache_get(key: str) -> Optional[Dict[str, Any]]:
-    item = _CACHE.get(key)
-    if not item:
-        return None
-    expires_at, payload = item
-    if time.time() >= expires_at:
-        _CACHE.pop(key, None)
-        return None
-    return payload
-
-
-def _cache_set(key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    _CACHE[key] = (time.time() + CACHE_TTL_SECONDS, payload)
-    return payload
-
-
 def _download_history(tickers: Sequence[str], period: str = "2y") -> pd.DataFrame:
-    ticker_list = list(dict.fromkeys([ticker for ticker in tickers if ticker]))
+    ticker_list = _dedupe(tickers)
     if not ticker_list:
         return pd.DataFrame()
     try:
@@ -234,231 +236,39 @@ def _slice_history(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
     return output[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
 
 
-def _series_get(statement: pd.DataFrame, possible_names: Sequence[str]) -> List[Optional[float]]:
-    if statement is None or statement.empty:
-        return []
-    lookup = {str(label).lower().strip(): label for label in statement.index}
-    for name in possible_names:
-        key = str(name).lower().strip()
-        if key in lookup:
-            return [_finite(value) for value in statement.loc[lookup[key]].tolist()]
-    return []
-
-
-def _latest(values: Sequence[Optional[float]]) -> Optional[float]:
-    for value in values:
-        if value is not None:
-            return value
-    return None
-
-
-def _prior(values: Sequence[Optional[float]]) -> Optional[float]:
-    found_latest = False
-    for value in values:
-        if value is None:
-            continue
-        if not found_latest:
-            found_latest = True
-            continue
-        return value
-    return None
-
-
-def _growth(latest: Optional[float], prior: Optional[float]) -> Optional[float]:
-    if latest is None or prior is None or abs(prior) < 1e-12:
-        return None
-    return (latest - prior) / abs(prior)
-
-
-def _slope_of_last(values: Sequence[Optional[float]], count: int = 3) -> Optional[float]:
-    clean = [value for value in values if value is not None]
-    if len(clean) < count:
-        return None
-    y = list(reversed(clean[:count]))
-    x = list(range(len(y)))
-    try:
-        return _finite(np.polyfit(x, y, 1)[0])
-    except Exception:
-        return None
-
-
-def _financial_profile(ticker: str) -> Dict[str, Any]:
-    yf_ticker = yf.Ticker(ticker)
-    try:
-        info = yf_ticker.info or {}
-    except Exception:
-        info = {}
-    try:
-        q_fin = yf_ticker.quarterly_financials
-    except Exception:
-        q_fin = pd.DataFrame()
-    try:
-        a_fin = yf_ticker.financials
-    except Exception:
-        a_fin = pd.DataFrame()
-    try:
-        q_bal = yf_ticker.quarterly_balance_sheet
-    except Exception:
-        q_bal = pd.DataFrame()
-    try:
-        a_bal = yf_ticker.balance_sheet
-    except Exception:
-        a_bal = pd.DataFrame()
-    try:
-        q_cf = yf_ticker.quarterly_cashflow
-    except Exception:
-        q_cf = pd.DataFrame()
-    try:
-        a_cf = yf_ticker.cashflow
-    except Exception:
-        a_cf = pd.DataFrame()
-
-    revenue = _series_get(q_fin, ["Total Revenue", "Operating Revenue"]) or _series_get(a_fin, ["Total Revenue", "Operating Revenue"])
-    gross_profit = _series_get(q_fin, ["Gross Profit"]) or _series_get(a_fin, ["Gross Profit"])
-    operating_income = _series_get(q_fin, ["Operating Income", "EBIT"]) or _series_get(a_fin, ["Operating Income", "EBIT"])
-    net_income = _series_get(q_fin, ["Net Income", "Net Income Common Stockholders"]) or _series_get(a_fin, ["Net Income", "Net Income Common Stockholders"])
-    eps = _series_get(q_fin, ["Diluted EPS", "Basic EPS"])
-
-    ocf = _series_get(q_cf, ["Operating Cash Flow", "Total Cash From Operating Activities"]) or _series_get(a_cf, ["Operating Cash Flow", "Total Cash From Operating Activities"])
-    capex = _series_get(q_cf, ["Capital Expenditure", "Capital Expenditures"]) or _series_get(a_cf, ["Capital Expenditure", "Capital Expenditures"])
-
-    cash = _series_get(q_bal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments", "Cash And Short Term Investments"]) or _series_get(a_bal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"])
-    debt = _series_get(q_bal, ["Total Debt", "Long Term Debt"]) or _series_get(a_bal, ["Total Debt", "Long Term Debt"])
-    current_assets = _series_get(q_bal, ["Current Assets", "Total Current Assets"])
-    current_liabilities = _series_get(q_bal, ["Current Liabilities", "Total Current Liabilities"])
-    shares = _series_get(q_bal, ["Ordinary Shares Number", "Share Issued", "Common Stock Shares Outstanding"])
-
-    latest_revenue = _latest(revenue)
-    prior_revenue = _prior(revenue)
-    revenue_growth = _growth(latest_revenue, prior_revenue)
-
-    revenue_growth_rates = []
-    for index in range(0, max(0, len(revenue) - 1)):
-        rate = _growth(revenue[index], revenue[index + 1])
-        if rate is not None:
-            revenue_growth_rates.append(rate)
-
-    eps_growth_rates = []
-    for index in range(0, max(0, len(eps) - 1)):
-        rate = _growth(eps[index], eps[index + 1])
-        if rate is not None:
-            eps_growth_rates.append(rate)
-
-    revenue_acceleration = _slope_of_last(revenue_growth_rates, 3)
-    eps_acceleration = _slope_of_last(eps_growth_rates, 3)
-
-    latest_gross_profit = _latest(gross_profit)
-    prior_gross_profit = _prior(gross_profit)
-    latest_operating_income = _latest(operating_income)
-    prior_operating_income = _prior(operating_income)
-    latest_net_income = _latest(net_income)
-
-    gross_margin = _safe_divide(latest_gross_profit, latest_revenue)
-    prior_gross_margin = _safe_divide(prior_gross_profit, prior_revenue)
-    operating_margin = _safe_divide(latest_operating_income, latest_revenue)
-    prior_operating_margin = _safe_divide(prior_operating_income, prior_revenue)
-    net_margin = _safe_divide(latest_net_income, latest_revenue)
-
-    gross_margin_delta = gross_margin - prior_gross_margin if gross_margin is not None and prior_gross_margin is not None else None
-    operating_margin_delta = operating_margin - prior_operating_margin if operating_margin is not None and prior_operating_margin is not None else None
-
-    latest_ocf = _latest(ocf)
-    latest_capex = _latest(capex)
-    prior_ocf = _prior(ocf)
-    prior_capex = _prior(capex)
-    fcf = latest_ocf + (latest_capex or 0.0) if latest_ocf is not None else None
-    prior_fcf = prior_ocf + (prior_capex or 0.0) if prior_ocf is not None else None
-    fcf_margin = _safe_divide(fcf, latest_revenue)
-    prior_fcf_margin = _safe_divide(prior_fcf, prior_revenue)
-    fcf_margin_delta = fcf_margin - prior_fcf_margin if fcf_margin is not None and prior_fcf_margin is not None else None
-    fcf_inflection = bool(fcf is not None and ((prior_fcf is not None and prior_fcf < 0 and fcf > 0) or (fcf_margin_delta is not None and fcf_margin_delta > 0.04)))
-
-    latest_cash = _latest(cash)
-    latest_debt = _latest(debt)
-    latest_current_assets = _latest(current_assets)
-    latest_current_liabilities = _latest(current_liabilities)
-    latest_shares = _latest(shares)
-    prior_shares = _prior(shares)
-
-    net_debt = (latest_debt or 0.0) - (latest_cash or 0.0) if latest_cash is not None or latest_debt is not None else None
-    current_ratio = _safe_divide(latest_current_assets, latest_current_liabilities)
-    share_dilution = _growth(latest_shares, prior_shares)
-
-    net_debt_to_operating_income = None
-    if net_debt is not None and latest_operating_income is not None and latest_operating_income > 0:
-        net_debt_to_operating_income = net_debt / latest_operating_income
-
-    return {
-        "ticker": ticker,
-        "name": info.get("shortName") or info.get("longName") or ticker,
-        "sector": info.get("sector") or "Unknown",
-        "industry": info.get("industry") or "",
-        "theme": _ticker_theme(ticker),
-        "market_cap": _finite(info.get("marketCap")),
-        "current_price": _finite(info.get("currentPrice") or info.get("regularMarketPrice")),
-        "analyst_count": _finite(info.get("numberOfAnalystOpinions")),
-        "held_percent_institutions": _finite(info.get("heldPercentInstitutions")),
-        "short_percent_float": _finite(info.get("shortPercentOfFloat")),
-        "forward_pe": _finite(info.get("forwardPE")),
-        "peg_ratio": _finite(info.get("pegRatio")),
-        "price_to_sales": _finite(info.get("priceToSalesTrailing12Months")),
-        "beta": _finite(info.get("beta")),
-        "revenue_growth": revenue_growth,
-        "revenue_acceleration": revenue_acceleration,
-        "eps_acceleration": eps_acceleration,
-        "gross_margin": gross_margin,
-        "gross_margin_delta": gross_margin_delta,
-        "operating_margin": operating_margin,
-        "operating_margin_delta": operating_margin_delta,
-        "net_margin": net_margin,
-        "fcf": fcf,
-        "fcf_margin": fcf_margin,
-        "fcf_margin_delta": fcf_margin_delta,
-        "fcf_inflection": fcf_inflection,
-        "cash": latest_cash,
-        "debt": latest_debt,
-        "net_debt": net_debt,
-        "current_ratio": current_ratio,
-        "share_dilution": share_dilution,
-        "net_debt_to_operating_income": net_debt_to_operating_income,
-    }
-
-
 def _atr14(data: pd.DataFrame) -> pd.Series:
     high = data["High"].astype(float)
     low = data["Low"].astype(float)
     close = data["Close"].astype(float)
     previous_close = close.shift(1)
-    tr = pd.concat([high - low, (high - previous_close).abs(), (low - previous_close).abs()], axis=1).max(axis=1)
-    return tr.rolling(14, min_periods=14).mean()
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return true_range.rolling(14, min_periods=14).mean()
 
 
-def _price_technicals(history: pd.DataFrame, benchmark_history: pd.DataFrame) -> Dict[str, Any]:
+def _technical_row(ticker: str, history: pd.DataFrame, benchmark_history: pd.DataFrame) -> Optional[Dict[str, Any]]:
     if history.empty or len(history) < 130:
-        return {
-            "close": None,
-            "technical_score": 40.0,
-            "momentum_score": 40.0,
-            "return_1m": None,
-            "return_3m": None,
-            "return_6m": None,
-            "return_12m": None,
-            "annualized_volatility": 0.65,
-            "dollar_volume_20": None,
-            "stage2_transition": False,
-            "ma_stack_alignment": False,
-            "volume_dryup": False,
-            "volume_expansion": False,
-            "rs_new_high": False,
-            "base_quality_score": 40.0,
-            "risk_state": "Data limited",
-            "stop_level": None,
-        }
+        return None
 
     close = history["Close"].astype(float)
     volume = history["Volume"].astype(float)
-    returns = close.pct_change()
+
     latest_close = _finite(close.iloc[-1])
+    if latest_close is None or latest_close < MIN_PRICE:
+        return None
+
+    dollar_volume_20 = _finite((close * volume).rolling(20, min_periods=20).mean().iloc[-1])
+    if dollar_volume_20 is not None and dollar_volume_20 < MIN_DOLLAR_VOLUME_20:
+        return None
+
+    returns = close.pct_change()
+    vol = _finite(returns.tail(60).std() * math.sqrt(252)) or 0.70
 
     ema21 = close.ewm(span=21, adjust=False).mean()
     sma50 = close.rolling(50, min_periods=50).mean()
@@ -476,35 +286,66 @@ def _price_technicals(history: pd.DataFrame, benchmark_history: pd.DataFrame) ->
     sma150_slope = _finite(sma150.iloc[-1] - sma150.iloc[-21]) if len(sma150) > 22 else None
     sma200_slope = _finite(sma200.iloc[-1] - sma200.iloc[-21]) if len(sma200) > 22 else None
 
-    ma_stack_alignment = bool(latest_close is not None and sma50_value is not None and sma150_value is not None and sma200_value is not None and latest_close > sma50_value > sma150_value > sma200_value and (sma150_slope or 0.0) > 0 and (sma200_slope or 0.0) > 0)
-    stage2_transition = bool(latest_close is not None and sma150_value is not None and sma200_value is not None and latest_close > sma150_value and latest_close > sma200_value and (sma150_slope or 0.0) > 0)
+    ma_stack_alignment = bool(
+        sma50_value is not None
+        and sma150_value is not None
+        and sma200_value is not None
+        and latest_close > sma50_value > sma150_value > sma200_value
+        and (sma150_slope or 0) > 0
+        and (sma200_slope or 0) > 0
+    )
+    stage2_transition = bool(
+        sma150_value is not None
+        and sma200_value is not None
+        and latest_close > sma150_value
+        and latest_close > sma200_value
+        and (sma150_slope or 0) > 0
+    )
 
-    vol20 = volume.rolling(20, min_periods=20).mean()
-    vol60 = volume.rolling(60, min_periods=40).mean()
-    volume_dryup = bool(_finite(vol20.iloc[-5:].mean()) is not None and _finite(vol60.iloc[-1]) is not None and vol20.iloc[-5:].mean() < vol60.iloc[-1] * 0.78)
-    volume_expansion = bool(_finite(volume.iloc[-1]) is not None and _finite(vol20.iloc[-1]) is not None and volume.iloc[-1] > vol20.iloc[-1] * 1.5)
+    rolling_vol_20 = volume.rolling(20, min_periods=20).mean()
+    rolling_vol_60 = volume.rolling(60, min_periods=40).mean()
+    volume_dryup = bool(
+        _finite(rolling_vol_20.iloc[-5:].mean()) is not None
+        and _finite(rolling_vol_60.iloc[-1]) is not None
+        and rolling_vol_20.iloc[-5:].mean() < rolling_vol_60.iloc[-1] * 0.80
+    )
+    volume_expansion = bool(
+        _finite(volume.iloc[-1]) is not None
+        and _finite(rolling_vol_20.iloc[-1]) is not None
+        and volume.iloc[-1] > rolling_vol_20.iloc[-1] * 1.5
+    )
+
+    rs_new_high = False
+    if not benchmark_history.empty:
+        aligned = pd.concat(
+            [
+                close.rename("stock"),
+                benchmark_history["Close"].astype(float).rename("benchmark"),
+            ],
+            axis=1,
+        ).dropna()
+        if len(aligned) > 80:
+            rs_line = aligned["stock"] / aligned["benchmark"]
+            rs_new_high = bool(rs_line.iloc[-1] >= rs_line.tail(63).max() * 0.995)
 
     price_range_20 = _safe_divide(close.tail(20).max() - close.tail(20).min(), close.iloc[-1])
     realized_vol_20 = _finite(returns.tail(20).std())
     realized_vol_60 = _finite(returns.tail(60).std())
-    contraction = 1 - realized_vol_20 / realized_vol_60 if realized_vol_20 is not None and realized_vol_60 not in [None, 0] else None
-    base_quality_score = _score_linear(contraction, -0.2, 0.45, missing=45) * 0.55 + (75 if volume_dryup else 45) * 0.25 + _score_linear(-(price_range_20 or 0.30), -0.35, -0.04, missing=45) * 0.20
+    contraction = None
+    if realized_vol_20 is not None and realized_vol_60 is not None and realized_vol_60 > 0:
+        contraction = 1 - realized_vol_20 / realized_vol_60
 
-    rs_new_high = False
-    if not benchmark_history.empty and len(benchmark_history) > 130:
-        aligned = pd.concat([close.rename("stock"), benchmark_history["Close"].astype(float).rename("benchmark")], axis=1).dropna()
-        if len(aligned) > 80:
-            rs = aligned["stock"] / aligned["benchmark"]
-            rs_new_high = bool(rs.iloc[-1] >= rs.tail(63).max() * 0.995)
-
-    annualized_volatility = _finite(returns.tail(60).std() * math.sqrt(252)) or 0.65
-    dollar_volume_20 = _finite((close * volume).rolling(20, min_periods=20).mean().iloc[-1])
+    base_quality_score = (
+        _score_linear(contraction, -0.2, 0.45, missing=45) * 0.55
+        + _score_linear(-(price_range_20 or 0.30), -0.35, -0.04, missing=45) * 0.20
+        + (75 if volume_dryup else 45) * 0.25
+    )
 
     technical_score = 45.0
-    if latest_close is not None and _finite(ema21.iloc[-1]) is not None:
-        technical_score += 8 if latest_close > ema21.iloc[-1] else -8
-    if latest_close is not None and sma50_value is not None:
-        technical_score += 9 if latest_close > sma50_value else -9
+    if latest_close > (_finite(ema21.iloc[-1]) or float("inf")):
+        technical_score += 8
+    if sma50_value is not None and latest_close > sma50_value:
+        technical_score += 9
     if stage2_transition:
         technical_score += 12
     if ma_stack_alignment:
@@ -517,170 +358,423 @@ def _price_technicals(history: pd.DataFrame, benchmark_history: pd.DataFrame) ->
         technical_score += 12
 
     momentum_score = 45.0
+    if ret_1m is not None:
+        momentum_score += max(-12, min(18, ret_1m * 80))
     if ret_3m is not None:
-        momentum_score += max(-14, min(22, ret_3m * 60))
+        momentum_score += max(-14, min(24, ret_3m * 60))
     if ret_6m is not None:
-        momentum_score += max(-12, min(20, ret_6m * 35))
+        momentum_score += max(-12, min(18, ret_6m * 36))
     if ret_12m is not None:
-        momentum_score += max(-10, min(16, ret_12m * 22))
-    if ret_1m is not None and ret_3m is not None and ret_6m is not None and ret_1m > ret_3m / 3 and ret_3m > ret_6m / 2:
-        momentum_score += 12
+        momentum_score += max(-8, min(12, ret_12m * 20))
+    if ret_1m is not None and ret_3m is not None and ret_6m is not None:
+        if ret_1m > ret_3m / 3 and ret_3m > ret_6m / 2:
+            momentum_score += 10
     if rs_new_high:
         momentum_score += 10
-    if annualized_volatility > 1.1:
+    if vol > 1.1:
         momentum_score -= 10
-    elif annualized_volatility > 0.8:
+    elif vol > 0.8:
         momentum_score -= 5
 
-    atr = _atr14(history)
-    latest_atr = _finite(atr.iloc[-1])
-    stop_level = latest_close - ATR_STOP_MULTIPLE * latest_atr if latest_close is not None and latest_atr is not None else None
+    latest_atr = _finite(_atr14(history).iloc[-1])
+    stop_level = latest_close - ATR_STOP_MULTIPLE * latest_atr if latest_atr is not None else None
 
-    below_ema21_count = 0
-    for offset in [1, 2, 3]:
-        if len(close) <= offset:
-            break
-        c = _finite(close.iloc[-offset])
-        e = _finite(ema21.iloc[-offset])
-        if c is not None and e is not None and c < e:
-            below_ema21_count += 1
-        else:
-            break
-
-    if below_ema21_count >= 3:
-        risk_state = "Trend break"
-    elif latest_close is not None and sma50_value is not None and latest_close > sma50_value:
-        risk_state = "Trend supported"
-    elif stage2_transition:
-        risk_state = "Base supported"
-    else:
+    risk_state = "Trend supported"
+    if sma50_value is not None and latest_close < sma50_value:
         risk_state = "Neutral"
+    if _finite(ema21.iloc[-1]) is not None and latest_close < ema21.iloc[-1]:
+        risk_state = "Watch"
+
+    fast_score = _clamp(
+        technical_score * 0.46
+        + momentum_score * 0.34
+        + base_quality_score * 0.20
+    )
 
     return {
+        "ticker": ticker,
         "close": latest_close,
+        "theme": _ticker_theme(ticker),
         "technical_score": _clamp(technical_score),
         "momentum_score": _clamp(momentum_score),
+        "base_quality_score": _clamp(base_quality_score),
+        "fast_score": fast_score,
         "return_1m": ret_1m,
         "return_3m": ret_3m,
         "return_6m": ret_6m,
         "return_12m": ret_12m,
-        "annualized_volatility": annualized_volatility,
+        "annualized_volatility": vol,
         "dollar_volume_20": dollar_volume_20,
         "stage2_transition": stage2_transition,
         "ma_stack_alignment": ma_stack_alignment,
         "volume_dryup": volume_dryup,
         "volume_expansion": volume_expansion,
         "rs_new_high": rs_new_high,
-        "base_quality_score": _clamp(base_quality_score),
         "risk_state": risk_state,
         "stop_level": stop_level,
     }
 
 
+def _financial_profile(ticker: str) -> Dict[str, Any]:
+    output = {
+        "ticker": ticker,
+        "name": ticker,
+        "sector": "Unknown",
+        "industry": "",
+        "market_cap": None,
+        "analyst_count": None,
+        "held_percent_institutions": None,
+        "short_percent_float": None,
+        "forward_pe": None,
+        "peg_ratio": None,
+        "price_to_sales": None,
+        "revenue_growth": None,
+        "revenue_acceleration": None,
+        "eps_acceleration": None,
+        "gross_margin": None,
+        "gross_margin_delta": None,
+        "operating_margin": None,
+        "operating_margin_delta": None,
+        "fcf_margin": None,
+        "fcf_margin_delta": None,
+        "fcf_inflection": False,
+        "current_ratio": None,
+        "share_dilution": None,
+        "net_debt_to_operating_income": None,
+        "fundamental_fetch_status": "fallback",
+    }
+
+    try:
+        stock = yf.Ticker(ticker)
+
+        try:
+            info = stock.info or {}
+        except Exception:
+            info = {}
+
+        output.update(
+            {
+                "name": info.get("shortName") or info.get("longName") or ticker,
+                "sector": info.get("sector") or "Unknown",
+                "industry": info.get("industry") or "",
+                "market_cap": _finite(info.get("marketCap")),
+                "analyst_count": _finite(info.get("numberOfAnalystOpinions")),
+                "held_percent_institutions": _finite(info.get("heldPercentInstitutions")),
+                "short_percent_float": _finite(info.get("shortPercentOfFloat")),
+                "forward_pe": _finite(info.get("forwardPE")),
+                "peg_ratio": _finite(info.get("pegRatio")),
+                "price_to_sales": _finite(info.get("priceToSalesTrailing12Months")),
+            }
+        )
+
+        try:
+            q_fin = stock.quarterly_financials
+        except Exception:
+            q_fin = pd.DataFrame()
+
+        try:
+            q_bal = stock.quarterly_balance_sheet
+        except Exception:
+            q_bal = pd.DataFrame()
+
+        try:
+            q_cf = stock.quarterly_cashflow
+        except Exception:
+            q_cf = pd.DataFrame()
+
+        def series_get(statement: pd.DataFrame, names: Sequence[str]) -> List[Optional[float]]:
+            if statement is None or statement.empty:
+                return []
+            lookup = {str(label).lower().strip(): label for label in statement.index}
+            for name in names:
+                key = str(name).lower().strip()
+                if key in lookup:
+                    return [_finite(value) for value in statement.loc[lookup[key]].tolist()]
+            return []
+
+        def latest(values: Sequence[Optional[float]]) -> Optional[float]:
+            for value in values:
+                if value is not None:
+                    return value
+            return None
+
+        def prior(values: Sequence[Optional[float]]) -> Optional[float]:
+            found = False
+            for value in values:
+                if value is None:
+                    continue
+                if not found:
+                    found = True
+                    continue
+                return value
+            return None
+
+        def growth(a: Optional[float], b: Optional[float]) -> Optional[float]:
+            if a is None or b is None or abs(b) < 1e-12:
+                return None
+            return (a - b) / abs(b)
+
+        def slope(values: Sequence[Optional[float]]) -> Optional[float]:
+            clean = [v for v in values if v is not None]
+            if len(clean) < 3:
+                return None
+            y = list(reversed(clean[:3]))
+            return _finite(np.polyfit(list(range(len(y))), y, 1)[0])
+
+        revenue = series_get(q_fin, ["Total Revenue", "Operating Revenue"])
+        gross_profit = series_get(q_fin, ["Gross Profit"])
+        operating_income = series_get(q_fin, ["Operating Income", "EBIT"])
+        eps = series_get(q_fin, ["Diluted EPS", "Basic EPS"])
+        ocf = series_get(q_cf, ["Operating Cash Flow", "Total Cash From Operating Activities"])
+        capex = series_get(q_cf, ["Capital Expenditure", "Capital Expenditures"])
+        cash = series_get(q_bal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"])
+        debt = series_get(q_bal, ["Total Debt", "Long Term Debt"])
+        current_assets = series_get(q_bal, ["Current Assets", "Total Current Assets"])
+        current_liabilities = series_get(q_bal, ["Current Liabilities", "Total Current Liabilities"])
+        shares = series_get(q_bal, ["Ordinary Shares Number", "Share Issued", "Common Stock Shares Outstanding"])
+
+        latest_revenue = latest(revenue)
+        prior_revenue = prior(revenue)
+        revenue_growth = growth(latest_revenue, prior_revenue)
+
+        revenue_growth_rates = []
+        for index in range(0, max(0, len(revenue) - 1)):
+            rate = growth(revenue[index], revenue[index + 1])
+            if rate is not None:
+                revenue_growth_rates.append(rate)
+
+        eps_growth_rates = []
+        for index in range(0, max(0, len(eps) - 1)):
+            rate = growth(eps[index], eps[index + 1])
+            if rate is not None:
+                eps_growth_rates.append(rate)
+
+        latest_gross_profit = latest(gross_profit)
+        prior_gross_profit = prior(gross_profit)
+        latest_operating_income = latest(operating_income)
+        prior_operating_income = prior(operating_income)
+
+        gross_margin = _safe_divide(latest_gross_profit, latest_revenue)
+        prior_gross_margin = _safe_divide(prior_gross_profit, prior_revenue)
+        operating_margin = _safe_divide(latest_operating_income, latest_revenue)
+        prior_operating_margin = _safe_divide(prior_operating_income, prior_revenue)
+
+        latest_ocf = latest(ocf)
+        prior_ocf = prior(ocf)
+        latest_capex = latest(capex)
+        prior_capex = prior(capex)
+
+        fcf = latest_ocf + (latest_capex or 0.0) if latest_ocf is not None else None
+        prior_fcf = prior_ocf + (prior_capex or 0.0) if prior_ocf is not None else None
+
+        fcf_margin = _safe_divide(fcf, latest_revenue)
+        prior_fcf_margin = _safe_divide(prior_fcf, prior_revenue)
+        fcf_margin_delta = None
+        if fcf_margin is not None and prior_fcf_margin is not None:
+            fcf_margin_delta = fcf_margin - prior_fcf_margin
+
+        latest_cash = latest(cash)
+        latest_debt = latest(debt)
+        net_debt = None
+        if latest_cash is not None or latest_debt is not None:
+            net_debt = (latest_debt or 0.0) - (latest_cash or 0.0)
+
+        current_ratio = _safe_divide(latest(current_assets), latest(current_liabilities))
+        share_dilution = growth(latest(shares), prior(shares))
+
+        net_debt_to_operating_income = None
+        if net_debt is not None and latest_operating_income is not None and latest_operating_income > 0:
+            net_debt_to_operating_income = net_debt / latest_operating_income
+
+        output.update(
+            {
+                "revenue_growth": revenue_growth,
+                "revenue_acceleration": slope(revenue_growth_rates),
+                "eps_acceleration": slope(eps_growth_rates),
+                "gross_margin": gross_margin,
+                "gross_margin_delta": gross_margin - prior_gross_margin if gross_margin is not None and prior_gross_margin is not None else None,
+                "operating_margin": operating_margin,
+                "operating_margin_delta": operating_margin - prior_operating_margin if operating_margin is not None and prior_operating_margin is not None else None,
+                "fcf_margin": fcf_margin,
+                "fcf_margin_delta": fcf_margin_delta,
+                "fcf_inflection": bool(fcf is not None and ((prior_fcf is not None and prior_fcf < 0 and fcf > 0) or (fcf_margin_delta is not None and fcf_margin_delta > 0.04))),
+                "current_ratio": current_ratio,
+                "share_dilution": share_dilution,
+                "net_debt_to_operating_income": net_debt_to_operating_income,
+                "fundamental_fetch_status": "complete",
+            }
+        )
+    except Exception:
+        pass
+
+    return output
+
+
+def _neutral_profile(ticker: str) -> Dict[str, Any]:
+    return _financial_profile.__defaults__[0] if False else {
+        "ticker": ticker,
+        "name": ticker,
+        "sector": "Unknown",
+        "industry": "",
+        "market_cap": None,
+        "analyst_count": None,
+        "held_percent_institutions": None,
+        "short_percent_float": None,
+        "forward_pe": None,
+        "peg_ratio": None,
+        "price_to_sales": None,
+        "revenue_growth": None,
+        "revenue_acceleration": None,
+        "eps_acceleration": None,
+        "gross_margin": None,
+        "gross_margin_delta": None,
+        "operating_margin": None,
+        "operating_margin_delta": None,
+        "fcf_margin": None,
+        "fcf_margin_delta": None,
+        "fcf_inflection": False,
+        "current_ratio": None,
+        "share_dilution": None,
+        "net_debt_to_operating_income": None,
+        "fundamental_fetch_status": "timeout_fallback",
+    }
+
+
+def _fetch_profiles_bounded(tickers: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    profiles = {}
+    ticker_list = list(tickers)
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_ticker = {
+            executor.submit(_financial_profile, ticker): ticker
+            for ticker in ticker_list
+        }
+
+        done, not_done = wait(
+            future_to_ticker.keys(),
+            timeout=FUNDAMENTAL_TIME_BUDGET_SECONDS,
+        )
+
+        for future in done:
+            ticker = future_to_ticker[future]
+            try:
+                profiles[ticker] = future.result()
+            except Exception:
+                profiles[ticker] = _neutral_profile(ticker)
+
+        for future in not_done:
+            ticker = future_to_ticker[future]
+            profiles[ticker] = _neutral_profile(ticker)
+
+    return profiles
+
+
 def _score_fundamentals(profile: Dict[str, Any]) -> float:
     return _clamp(
-        _score_linear(profile.get("revenue_acceleration"), -0.05, 0.08, missing=48) * 0.25
-        + _score_linear(profile.get("revenue_growth"), 0.05, 0.55, missing=48) * 0.18
-        + _score_linear(profile.get("eps_acceleration"), -0.05, 0.10, missing=45) * 0.15
-        + _score_linear(profile.get("gross_margin_delta"), -0.03, 0.08, missing=48) * 0.13
-        + _score_linear(profile.get("operating_margin_delta"), -0.04, 0.10, missing=48) * 0.17
-        + (82.0 if profile.get("fcf_inflection") else _score_linear(profile.get("fcf_margin_delta"), -0.06, 0.10, missing=45)) * 0.12
+        _score_linear(profile.get("revenue_acceleration"), -0.05, 0.08, missing=50) * 0.26
+        + _score_linear(profile.get("revenue_growth"), 0.05, 0.55, missing=50) * 0.18
+        + _score_linear(profile.get("eps_acceleration"), -0.05, 0.10, missing=48) * 0.14
+        + _score_linear(profile.get("gross_margin_delta"), -0.03, 0.08, missing=50) * 0.12
+        + _score_linear(profile.get("operating_margin_delta"), -0.04, 0.10, missing=50) * 0.18
+        + (82 if profile.get("fcf_inflection") else _score_linear(profile.get("fcf_margin_delta"), -0.06, 0.10, missing=48)) * 0.12
     )
 
 
-def _score_balance_sheet(profile: Dict[str, Any]) -> float:
-    current_ratio_score = _score_linear(profile.get("current_ratio"), 0.75, 2.5, missing=52)
-    nd = profile.get("net_debt_to_operating_income")
-    if nd is None:
-        net_debt_score = 78.0 if (profile.get("net_debt") or 0.0) <= 0 else 55.0
-    else:
-        net_debt_score = _score_linear(-nd, -4.5, 1.0, missing=52)
-    fcf_margin_score = _score_linear(profile.get("fcf_margin"), -0.15, 0.18, missing=45)
+def _score_balance(profile: Dict[str, Any]) -> float:
+    current_ratio_score = _score_linear(profile.get("current_ratio"), 0.75, 2.5, missing=55)
+    debt_value = profile.get("net_debt_to_operating_income")
+    debt_score = 55 if debt_value is None else _score_linear(-debt_value, -4.5, 1.0, missing=55)
+    fcf_score = _score_linear(profile.get("fcf_margin"), -0.15, 0.18, missing=50)
     dilution_score = _score_linear(-(profile.get("share_dilution") or 0.0), -0.12, 0.03, missing=55)
-    solvency = 70.0
-    if profile.get("current_ratio") is not None and profile.get("current_ratio") < 0.8:
-        solvency -= 25
-    if profile.get("net_debt_to_operating_income") is not None and profile.get("net_debt_to_operating_income") > 5:
-        solvency -= 25
-    return _clamp(current_ratio_score * 0.20 + net_debt_score * 0.25 + fcf_margin_score * 0.25 + dilution_score * 0.15 + solvency * 0.15)
+    return _clamp(current_ratio_score * 0.20 + debt_score * 0.28 + fcf_score * 0.30 + dilution_score * 0.22)
 
 
 def _score_sponsorship(profile: Dict[str, Any]) -> float:
-    analysts = profile.get("analyst_count")
+    analyst_count = profile.get("analyst_count")
     held = profile.get("held_percent_institutions")
-    short = profile.get("short_percent_float")
-    if analysts is None:
-        coverage = 55.0
-    elif 2 <= analysts <= 6:
-        coverage = 88.0
-    elif 7 <= analysts <= 12:
-        coverage = 72.0
-    elif analysts < 2:
-        coverage = 62.0
+    short_interest = profile.get("short_percent_float")
+
+    if analyst_count is None:
+        coverage = 55
+    elif 2 <= analyst_count <= 6:
+        coverage = 88
+    elif 7 <= analyst_count <= 12:
+        coverage = 72
+    elif analyst_count < 2:
+        coverage = 62
     else:
-        coverage = 42.0
+        coverage = 42
+
     if held is None:
-        ownership = 55.0
+        ownership = 55
     elif 0.20 <= held <= 0.70:
-        ownership = 86.0
-    elif held <= 0.88:
-        ownership = 68.0
+        ownership = 86
+    elif 0.70 < held <= 0.88:
+        ownership = 68
+    elif held > 0.88:
+        ownership = 40
     else:
-        ownership = 40.0
-    if short is None:
-        short_score = 55.0
-    elif 0.08 <= short <= 0.25:
-        short_score = 82.0
-    elif short > 0.25:
-        short_score = 58.0
+        ownership = 55
+
+    if short_interest is None:
+        short_score = 55
+    elif 0.08 <= short_interest <= 0.25:
+        short_score = 82
+    elif short_interest > 0.25:
+        short_score = 58
     else:
-        short_score = 52.0
+        short_score = 52
+
     return _clamp(coverage * 0.35 + ownership * 0.40 + short_score * 0.25)
 
 
 def _score_valuation(profile: Dict[str, Any]) -> float:
-    revenue_growth = profile.get("revenue_growth")
     peg = profile.get("peg_ratio")
     ps = profile.get("price_to_sales")
+    growth = profile.get("revenue_growth")
     fpe = profile.get("forward_pe")
+
     if peg is None or peg <= 0:
-        peg_score = 55.0
+        peg_score = 55
     elif peg <= 0.9:
-        peg_score = 85.0
+        peg_score = 85
     elif peg <= 1.6:
-        peg_score = 68.0
+        peg_score = 68
     elif peg <= 2.6:
-        peg_score = 52.0
+        peg_score = 52
     else:
-        peg_score = 34.0
+        peg_score = 34
+
     if ps is None or ps <= 0:
-        ps_score = 52.0
+        ps_score = 52
     else:
-        growth_percent = max(5.0, (revenue_growth or 0.15) * 100)
-        ps_to_growth = ps / growth_percent
-        if ps_to_growth <= 0.12:
-            ps_score = 86.0
-        elif ps_to_growth <= 0.22:
-            ps_score = 72.0
-        elif ps_to_growth <= 0.38:
-            ps_score = 55.0
+        growth_pct = max(5, (growth or 0.15) * 100)
+        ratio = ps / growth_pct
+        if ratio <= 0.12:
+            ps_score = 86
+        elif ratio <= 0.22:
+            ps_score = 72
+        elif ratio <= 0.38:
+            ps_score = 55
         else:
-            ps_score = 34.0
+            ps_score = 34
+
     if fpe is None or fpe <= 0:
-        pe_score = 52.0
+        pe_score = 52
     elif fpe <= 22:
-        pe_score = 80.0
+        pe_score = 80
     elif fpe <= 40:
-        pe_score = 63.0
+        pe_score = 63
     elif fpe <= 70:
-        pe_score = 45.0
+        pe_score = 45
     else:
-        pe_score = 28.0
+        pe_score = 28
+
     return _clamp(peg_score * 0.35 + ps_score * 0.45 + pe_score * 0.20)
 
 
 def _score_catalyst(profile: Dict[str, Any], technical: Dict[str, Any]) -> float:
-    score = 45.0
+    score = 45
     if profile.get("fcf_inflection"):
         score += 12
     if technical.get("stage2_transition"):
@@ -696,25 +790,24 @@ def _score_catalyst(profile: Dict[str, Any], technical: Dict[str, Any]) -> float
     return _clamp(score)
 
 
-def _score_row(ticker: str, profile: Dict[str, Any], technical: Dict[str, Any], industry_strength_score: float) -> Dict[str, Any]:
+def _combine_row(technical: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
     fundamental_score = _score_fundamentals(profile)
-    balance_sheet_score = _score_balance_sheet(profile)
+    balance_score = _score_balance(profile)
     sponsorship_score = _score_sponsorship(profile)
     valuation_score = _score_valuation(profile)
     catalyst_score = _score_catalyst(profile, technical)
-    technical_score = technical.get("technical_score") or 45.0
-    momentum_score = technical.get("momentum_score") or 45.0
-    base_quality_score = technical.get("base_quality_score") or 45.0
-    confluence_score = _clamp(
+
+    confluence = _clamp(
         fundamental_score * 0.26
-        + technical_score * 0.20
-        + momentum_score * 0.14
-        + balance_sheet_score * 0.13
+        + technical["technical_score"] * 0.20
+        + technical["momentum_score"] * 0.14
+        + balance_score * 0.13
         + sponsorship_score * 0.09
         + valuation_score * 0.08
         + catalyst_score * 0.06
-        + base_quality_score * 0.04
+        + technical["base_quality_score"] * 0.04
     )
+
     reasons = []
     if profile.get("revenue_acceleration") is not None and profile.get("revenue_acceleration") > 0:
         reasons.append("Revenue growth is accelerating")
@@ -732,349 +825,210 @@ def _score_row(ticker: str, profile: Dict[str, Any], technical: Dict[str, Any], 
         reasons.append("Volume expansion signal")
     if profile.get("analyst_count") is not None and 2 <= profile.get("analyst_count") <= 6:
         reasons.append("Still under-covered")
-    if profile.get("short_percent_float") is not None and profile.get("short_percent_float") >= 0.12:
-        reasons.append("Short interest can become fuel")
     if not reasons:
-        reasons.append("Mixed but monitorable SMID growth profile")
-    if confluence_score >= 78:
+        reasons.append("Monitorable SMID growth profile")
+
+    market_cap = profile.get("market_cap")
+    if market_cap is not None and (market_cap < MIN_MARKET_CAP or market_cap > MAX_MARKET_CAP):
+        confluence -= 8
+
+    if confluence >= 78:
         verdict = "Core SMID Growth"
-    elif confluence_score >= 68:
+    elif confluence >= 68:
         verdict = "High-Growth Watch"
-    elif confluence_score >= 58:
+    elif confluence >= 58:
         verdict = "Setup Developing"
     else:
         verdict = "Too Early"
+
     return {
         **profile,
         **technical,
-        "ticker": ticker,
+        "ticker": technical["ticker"],
+        "theme": technical.get("theme") or _ticker_theme(technical["ticker"]),
+        "fundamental_score": _clamp(fundamental_score),
+        "balance_sheet_score": _clamp(balance_score),
+        "sponsorship_score": _clamp(sponsorship_score),
+        "valuation_score": _clamp(valuation_score),
+        "catalyst_score": _clamp(catalyst_score),
+        "industry_strength_score": 50,
+        "confluence_score": _clamp(confluence),
         "verdict": verdict,
-        "confluence_score": confluence_score,
-        "fundamental_score": fundamental_score,
-        "balance_sheet_score": balance_sheet_score,
-        "sponsorship_score": sponsorship_score,
-        "valuation_score": valuation_score,
-        "catalyst_score": catalyst_score,
-        "industry_strength_score": industry_strength_score,
         "reasons": reasons[:5],
     }
 
 
-def _passes_universe_filter(row: Dict[str, Any]) -> Tuple[bool, str]:
-    market_cap = _finite(row.get("market_cap"))
-    close = _finite(row.get("close")) or _finite(row.get("current_price"))
-    dollar_volume = _finite(row.get("dollar_volume_20"))
-    if market_cap is not None and market_cap < MIN_MARKET_CAP:
-        return False, "Market cap below SMID threshold"
-    if market_cap is not None and market_cap > MAX_MARKET_CAP:
-        return False, "Market cap above SMID threshold"
-    if close is not None and close < MIN_PRICE:
-        return False, "Price below minimum"
-    if dollar_volume is not None and dollar_volume < MIN_DOLLAR_VOLUME_20:
-        return False, "Liquidity below minimum"
-    return True, "Eligible"
+def _select_holdings(rows: List[Dict[str, Any]], target_holdings: int) -> Dict[str, Any]:
+    candidates = [
+        row for row in rows
+        if (row.get("close") or 0) >= MIN_PRICE
+        and ((row.get("dollar_volume_20") is None) or row.get("dollar_volume_20") >= MIN_DOLLAR_VOLUME_20)
+        and (row.get("confluence_score") or 0) >= 52
+    ]
+    selected = candidates[:target_holdings]
+    if not selected:
+        selected = rows[:target_holdings]
 
+    if not selected:
+        return {"holdings": [], "stock_exposure": 0, "cash_weight": 1, "exposure_regime": "No SMID growth exposure"}
 
-def _build_rankings(tickers: Sequence[str]) -> Tuple[List[Dict[str, Any]], pd.DataFrame]:
-    price_frame = _download_history(list(tickers) + [BENCHMARK_TICKER], period="2y")
-    benchmark_history = _slice_history(price_frame, BENCHMARK_TICKER)
-    raw = []
-    for ticker in tickers:
-        history = _slice_history(price_frame, ticker)
-        profile = _financial_profile(ticker)
-        technical = _price_technicals(history, benchmark_history)
-        raw.append({"ticker": ticker, "profile": profile, "technical": technical})
+    avg_score = sum(row.get("confluence_score") or 0 for row in selected) / len(selected)
+    avg_technical = sum(row.get("technical_score") or 0 for row in selected) / len(selected)
 
-    sector_returns: Dict[str, List[float]] = {}
-    for item in raw:
-        sector = item["profile"].get("sector") or "Unknown"
-        ret = _finite(item["technical"].get("return_3m"))
-        if ret is not None:
-            sector_returns.setdefault(sector, []).append(ret)
-    sector_strength = {sector: float(pd.Series(returns).median()) for sector, returns in sector_returns.items() if returns}
-    sorted_strength = sorted(sector_strength.items(), key=lambda pair: pair[1])
-    strength_lookup = {pair[0]: 100 * (idx + 1) / len(sorted_strength) for idx, pair in enumerate(sorted_strength)} if sorted_strength else {}
-
-    rows = []
-    for item in raw:
-        row = _score_row(
-            ticker=item["ticker"],
-            profile=item["profile"],
-            technical=item["technical"],
-            industry_strength_score=strength_lookup.get(item["profile"].get("sector") or "Unknown", 50.0),
-        )
-        eligible, reason = _passes_universe_filter(row)
-        row["eligible"] = eligible
-        row["eligibility_reason"] = reason
-        if eligible:
-            rows.append(row)
-    rows.sort(key=lambda row: _finite(row.get("confluence_score")) or 0.0, reverse=True)
-    return rows, price_frame
-
-
-def _portfolio_exposure(holdings: List[Dict[str, Any]]) -> Tuple[float, str]:
-    if not holdings:
-        return 0.0, "No qualifying SMID growth exposure"
-    avg_score = sum(_finite(row.get("confluence_score")) or 0.0 for row in holdings) / len(holdings)
-    avg_technical = sum(_finite(row.get("technical_score")) or 0.0 for row in holdings) / len(holdings)
     if avg_score >= 76 and avg_technical >= 65:
-        return 0.92, "Aggressive SMID growth risk"
-    if avg_score >= 68 and avg_technical >= 58:
-        return 0.82, "Constructive SMID growth risk"
-    if avg_score >= 60:
-        return 0.68, "Moderate SMID growth risk"
-    return 0.50, "Reduced SMID growth risk"
+        exposure, regime = 0.92, "Aggressive SMID growth risk"
+    elif avg_score >= 68 and avg_technical >= 58:
+        exposure, regime = 0.82, "Constructive SMID growth risk"
+    elif avg_score >= 60:
+        exposure, regime = 0.68, "Moderate SMID growth risk"
+    else:
+        exposure, regime = 0.50, "Reduced SMID growth risk"
 
-
-def _normalize_weights(holdings: List[Dict[str, Any]], target_exposure: float) -> List[Dict[str, Any]]:
-    if not holdings:
-        return []
-    for row in holdings:
-        edge = max(0.01, (_finite(row.get("confluence_score")) or 55.0) - 55)
-        vol = max(0.22, _finite(row.get("annualized_volatility")) or 0.70)
+    for row in selected:
+        edge = max(0.01, (row.get("confluence_score") or 55) - 55)
+        vol = max(0.22, row.get("annualized_volatility") or 0.70)
         row["raw_weight"] = edge / (vol ** 2)
-    raw_total = sum(_finite(row.get("raw_weight")) or 0.0 for row in holdings)
-    for row in holdings:
-        row["target_weight"] = target_exposure / len(holdings) if raw_total <= 0 else target_exposure * (_finite(row.get("raw_weight")) or 0.0) / raw_total
+
+    raw_total = sum(row["raw_weight"] for row in selected)
+    for row in selected:
+        row["target_weight"] = exposure * row["raw_weight"] / raw_total if raw_total > 0 else exposure / len(selected)
+
     for _ in range(8):
-        excess = 0.0
+        excess = 0
         receivers = []
-        for row in holdings:
-            weight = _finite(row.get("target_weight")) or 0.0
-            if weight > MAX_SINGLE_POSITION:
+        for row in selected:
+            if row["target_weight"] > MAX_SINGLE_POSITION:
+                excess += row["target_weight"] - MAX_SINGLE_POSITION
                 row["target_weight"] = MAX_SINGLE_POSITION
-                excess += weight - MAX_SINGLE_POSITION
             else:
                 receivers.append(row)
         if excess <= 1e-8 or not receivers:
             break
-        receiver_total = sum(_finite(row.get("target_weight")) or 0.0 for row in receivers)
+        receiver_total = sum(row["target_weight"] for row in receivers)
         if receiver_total <= 0:
             break
         for row in receivers:
-            current = _finite(row.get("target_weight")) or 0.0
-            row["target_weight"] = current + excess * current / receiver_total
-    invested = sum(_finite(row.get("target_weight")) or 0.0 for row in holdings)
-    if invested > target_exposure:
-        scale = target_exposure / invested
-        for row in holdings:
-            row["target_weight"] *= scale
-    return holdings
+            row["target_weight"] += excess * row["target_weight"] / receiver_total
 
+    selected.sort(key=lambda row: row.get("target_weight") or 0, reverse=True)
 
-def _action_for(row: Dict[str, Any]) -> str:
-    score = _finite(row.get("confluence_score")) or 0.0
-    technical = _finite(row.get("technical_score")) or 0.0
-    risk_state = row.get("risk_state")
-    if risk_state == "Trend break" or score < 55 or technical < 45:
-        return "Watch"
-    if score >= 75 and technical >= 60:
-        return "Buy"
-    if score >= 64:
-        return "Hold"
-    return "Watch"
-
-
-def _current_portfolio(rows: List[Dict[str, Any]], target_holdings: int) -> Dict[str, Any]:
-    selected = rows[:target_holdings]
-    exposure, regime = _portfolio_exposure(selected)
-    holdings = _normalize_weights(selected, exposure)
-    holdings.sort(key=lambda row: _finite(row.get("target_weight")) or 0.0, reverse=True)
-    for index, row in enumerate(holdings):
+    for index, row in enumerate(selected):
         row["portfolio_rank"] = index + 1
-        row["action"] = _action_for(row)
-        row["sell_trigger"] = "Review or remove if confluence < 55, technical < 45, price loses the 50-day trend, or the ATR stop is breached."
-        row["hold_window"] = "4 to 12 weeks; review weekly because SMID setups decay quickly."
+        score = row.get("confluence_score") or 0
+        technical = row.get("technical_score") or 0
+        if score >= 75 and technical >= 60:
+            row["action"] = "Buy"
+        elif score >= 64:
+            row["action"] = "Hold"
+        else:
+            row["action"] = "Watch"
         row["trade_reason"] = "; ".join(row.get("reasons") or [])[:240]
-    invested = sum(_finite(row.get("target_weight")) or 0.0 for row in holdings)
-    return {"holdings": holdings, "stock_exposure": exposure, "cash_weight": max(0.0, 1.0 - invested), "exposure_regime": regime}
+        row["sell_trigger"] = "Review if confluence < 55, technical < 45, price loses the 50-day trend, or ATR stop is breached."
+        row["hold_window"] = "4 to 12 weeks; review weekly."
 
-
-def _score_at_date(history: pd.DataFrame, row: Dict[str, Any], position: int, benchmark_history: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    if history.empty or position < 130:
-        return None
-    close = history["Close"].astype(float)
-    volume = history["Volume"].astype(float)
-    current_close = _finite(close.iloc[position])
-    if current_close is None or current_close < MIN_PRICE:
-        return None
-    ret_1m = _safe_divide(close.iloc[position] - close.iloc[position - 21], close.iloc[position - 21])
-    ret_3m = _safe_divide(close.iloc[position] - close.iloc[position - 63], close.iloc[position - 63])
-    ret_6m = _safe_divide(close.iloc[position] - close.iloc[position - 126], close.iloc[position - 126])
-    sma50 = close.rolling(50, min_periods=50).mean()
-    sma150 = close.rolling(150, min_periods=120).mean()
-    dollar_volume = _finite((close * volume).rolling(20, min_periods=20).mean().iloc[position])
-    if dollar_volume is not None and dollar_volume < MIN_DOLLAR_VOLUME_20:
-        return None
-    returns = close.pct_change()
-    vol = _finite(returns.iloc[max(0, position - 60):position + 1].std() * math.sqrt(252)) or 0.70
-    trend = 45.0
-    if current_close > (_finite(sma50.iloc[position]) or float("inf")):
-        trend += 10
-    if current_close > (_finite(sma150.iloc[position]) or float("inf")) and (_finite(sma150.iloc[position] - sma150.iloc[position - 21]) or 0.0) > 0:
-        trend += 13
-    rs_score = 50.0
-    if not benchmark_history.empty:
-        benchmark_close = benchmark_history["Close"].astype(float)
-        date = history.index[position]
-        try:
-            bench_position = benchmark_history.index.get_indexer([date], method="pad")[0]
-        except Exception:
-            bench_position = -1
-        if bench_position > 63:
-            stock_rel = _safe_divide(close.iloc[position], close.iloc[position - 63])
-            bench_rel = _safe_divide(benchmark_close.iloc[bench_position], benchmark_close.iloc[bench_position - 63])
-            if stock_rel is not None and bench_rel is not None:
-                rs_score = _score_linear(stock_rel - bench_rel, -0.12, 0.35, missing=50)
-    momentum = 45.0
-    if ret_1m is not None:
-        momentum += max(-12, min(18, ret_1m * 80))
-    if ret_3m is not None:
-        momentum += max(-14, min(24, ret_3m * 60))
-    if ret_6m is not None:
-        momentum += max(-12, min(18, ret_6m * 36))
-    if ret_1m is not None and ret_3m is not None and ret_6m is not None and ret_1m > ret_3m / 3 and ret_3m > ret_6m / 2:
-        momentum += 10
-    static_quality = (
-        (_finite(row.get("fundamental_score")) or 55.0) * 0.35
-        + (_finite(row.get("balance_sheet_score")) or 55.0) * 0.25
-        + (_finite(row.get("sponsorship_score")) or 55.0) * 0.12
-        + (_finite(row.get("valuation_score")) or 55.0) * 0.10
-        + (_finite(row.get("catalyst_score")) or 55.0) * 0.18
-    )
-    score = _clamp(momentum * 0.35 + trend * 0.22 + rs_score * 0.18 + static_quality * 0.25)
-    raw_weight = max(0.01, score - 55) / (max(0.22, vol) ** 2)
-    return {"ticker": row.get("ticker"), "score": score, "raw_weight": raw_weight}
-
-
-def _weights_for_date(position: int, benchmark_history: pd.DataFrame, histories: Dict[str, pd.DataFrame], row_lookup: Dict[str, Dict[str, Any]], target_holdings: int) -> Dict[str, float]:
-    scores = []
-    date = benchmark_history.index[position]
-    for ticker, history in histories.items():
-        try:
-            local_position = history.index.get_indexer([date], method="pad")[0]
-        except Exception:
-            continue
-        score = _score_at_date(history, row_lookup.get(ticker, {"ticker": ticker}), local_position, benchmark_history)
-        if score is not None:
-            scores.append(score)
-    scores.sort(key=lambda item: item["score"], reverse=True)
-    selected = scores[:target_holdings]
-    if not selected:
-        return {}
-    raw_total = sum(item["raw_weight"] for item in selected)
-    weights = {item["ticker"]: 0.86 * item["raw_weight"] / raw_total for item in selected} if raw_total > 0 else {item["ticker"]: 0.80 / len(selected) for item in selected}
-    for _ in range(8):
-        excess = 0.0
-        receivers = []
-        for ticker, weight in list(weights.items()):
-            if weight > MAX_SINGLE_POSITION:
-                weights[ticker] = MAX_SINGLE_POSITION
-                excess += weight - MAX_SINGLE_POSITION
-            else:
-                receivers.append(ticker)
-        if excess <= 1e-8 or not receivers:
-            break
-        receiver_total = sum(weights[ticker] for ticker in receivers)
-        if receiver_total <= 0:
-            break
-        for ticker in receivers:
-            weights[ticker] += excess * weights[ticker] / receiver_total
-    return weights
-
-
-def _rebalance_actions(old_weights: Dict[str, float], new_weights: Dict[str, float]) -> Dict[str, Any]:
-    old_keys = set(old_weights.keys())
-    new_keys = set(new_weights.keys())
-    buys = sorted(list(new_keys - old_keys))
-    sells = sorted(list(old_keys - new_keys))
-    adds = []
-    trims = []
-    for ticker in sorted(list(old_keys & new_keys)):
-        delta = new_weights.get(ticker, 0.0) - old_weights.get(ticker, 0.0)
-        if delta > 0.015:
-            adds.append(ticker)
-        elif delta < -0.015:
-            trims.append(ticker)
-    parts = []
-    if buys:
-        parts.append("Bought " + ", ".join(buys[:3]))
-    if sells:
-        parts.append("Removed " + ", ".join(sells[:3]))
-    if not parts and adds:
-        parts.append("Added to " + ", ".join(adds[:3]))
-    if not parts and trims:
-        parts.append("Trimmed " + ", ".join(trims[:3]))
-    if not parts:
-        parts.append("No major changes")
-    turnover = 0.5 * sum(abs(new_weights.get(t, 0.0) - old_weights.get(t, 0.0)) for t in sorted(list(old_keys | new_keys)))
-    return {"headline": "; ".join(parts), "buys": buys, "sells": sells, "adds": adds, "trims": trims, "turnover": turnover}
-
-
-def _max_drawdown(values: Sequence[float]) -> float:
-    if not values:
-        return 0.0
-    peak = values[0]
-    max_dd = 0.0
-    for value in values:
-        peak = max(peak, value)
-        if peak > 0:
-            max_dd = min(max_dd, (value - peak) / peak)
-    return max_dd
-
-
-def _annualized_volatility(returns: Sequence[float]) -> float:
-    if len(returns) < 5:
-        return 0.0
-    return float(pd.Series(returns).std() * math.sqrt(252))
+    invested = sum(row.get("target_weight") or 0 for row in selected)
+    return {
+        "holdings": selected,
+        "stock_exposure": exposure,
+        "cash_weight": max(0, 1 - invested),
+        "exposure_regime": regime,
+    }
 
 
 def _simulate(rows: List[Dict[str, Any]], price_frame: pd.DataFrame, target_holdings: int) -> Dict[str, Any]:
-    benchmark_history = _slice_history(price_frame, BENCHMARK_TICKER)
-    if benchmark_history.empty or len(benchmark_history) < 180:
-        return {"series": [], "rebalance_log": [], "stats": {}, "diagnostics": {"reason": "Benchmark history unavailable"}}
+    benchmark = _slice_history(price_frame, BENCHMARK_TICKER)
+    if benchmark.empty or len(benchmark) < 180:
+        return {"series": [], "rebalance_log": [], "stats": {}, "diagnostics": {"reason": "No benchmark history"}}
+
     histories = {}
-    row_lookup = {}
-    for row in rows:
-        ticker = row.get("ticker")
-        history = _slice_history(price_frame, ticker)
-        if ticker and not history.empty:
-            histories[ticker] = history
-            row_lookup[ticker] = row
-    trading_index = benchmark_history.index
-    start = max(130, len(trading_index) - 252)
-    benchmark_close = benchmark_history["Close"].astype(float)
-    benchmark_returns = benchmark_close.pct_change().fillna(0)
-    benchmark_start = _finite(benchmark_close.iloc[start]) or 1.0
-    model_value = 1.0
-    weights: Dict[str, float] = {}
-    model_values, benchmark_values, model_returns, benchmark_daily_returns = [], [], [], []
-    series, rebalance_log = [], []
-    for position in range(start, len(trading_index)):
+    for row in rows[:max(35, target_holdings * 3)]:
+        history = _slice_history(price_frame, row["ticker"])
+        if not history.empty:
+            histories[row["ticker"]] = history
+
+    trading_index = benchmark.index
+    start_position = max(130, len(trading_index) - 252)
+    benchmark_close = benchmark["Close"].astype(float)
+    benchmark_start = _finite(benchmark_close.iloc[start_position]) or 1
+
+    value = 1.0
+    old_weights = {}
+    series = []
+    log = []
+    model_returns = []
+    benchmark_returns = []
+
+    for position in range(start_position, len(trading_index)):
         date = trading_index[position]
-        if position == start or (position - start) % 5 == 0:
-            new_weights = _weights_for_date(position, benchmark_history, histories, row_lookup, target_holdings)
-            if new_weights:
-                actions = _rebalance_actions(weights, new_weights)
-                if weights:
-                    model_value *= max(0.0, 1.0 - actions["turnover"] * TRANSACTION_COST_BPS / 10000.0)
-                top_holdings = sorted([{"ticker": ticker, "weight": weight} for ticker, weight in new_weights.items()], key=lambda x: x["weight"], reverse=True)
-                rebalance_log.append({
-                    "date": pd.Timestamp(date).date().isoformat(),
-                    "headline": actions["headline"],
-                    "turnover": actions["turnover"],
-                    "buys": actions["buys"],
-                    "sells": actions["sells"],
-                    "adds": actions["adds"],
-                    "trims": actions["trims"],
-                    "holdings": top_holdings[:15],
-                })
-                weights = new_weights
-        daily_return = 0.0
-        if weights and position > 0:
-            for ticker, weight in weights.items():
+
+        if position == start_position or (position - start_position) % 5 == 0:
+            scores = []
+            for row in rows[:max(35, target_holdings * 3)]:
+                ticker = row["ticker"]
                 history = histories.get(ticker)
-                if history is None or history.empty:
+                if history is None:
+                    continue
+                try:
+                    local_position = history.index.get_indexer([date], method="pad")[0]
+                except Exception:
+                    continue
+                if local_position < 130:
+                    continue
+                partial = history.iloc[: local_position + 1]
+                tech = _technical_row(ticker, partial, benchmark.iloc[: position + 1])
+                if tech:
+                    score = tech["fast_score"] * 0.70 + (row.get("fundamental_score") or 55) * 0.30
+                    vol = max(0.22, tech.get("annualized_volatility") or 0.70)
+                    scores.append({"ticker": ticker, "score": score, "raw": max(0.01, score - 55) / (vol ** 2)})
+            scores.sort(key=lambda item: item["score"], reverse=True)
+            selected = scores[:target_holdings]
+            raw_total = sum(item["raw"] for item in selected)
+            new_weights = {item["ticker"]: 0.86 * item["raw"] / raw_total for item in selected} if raw_total > 0 else {}
+
+            for key, weight in list(new_weights.items()):
+                if weight > MAX_SINGLE_POSITION:
+                    new_weights[key] = MAX_SINGLE_POSITION
+
+            buys = sorted(list(set(new_weights) - set(old_weights)))
+            sells = sorted(list(set(old_weights) - set(new_weights)))
+            adds = []
+            trims = []
+            for key in sorted(list(set(new_weights) & set(old_weights))):
+                if new_weights[key] - old_weights[key] > 0.015:
+                    adds.append(key)
+                elif old_weights[key] - new_weights[key] > 0.015:
+                    trims.append(key)
+
+            if new_weights:
+                turnover = 0.5 * sum(abs(new_weights.get(k, 0) - old_weights.get(k, 0)) for k in set(new_weights) | set(old_weights))
+                if old_weights:
+                    value *= max(0, 1 - turnover * TRANSACTION_COST_BPS / 10000)
+                headline = "No major changes"
+                if buys:
+                    headline = "Bought " + ", ".join(buys[:3])
+                elif sells:
+                    headline = "Removed " + ", ".join(sells[:3])
+                elif adds:
+                    headline = "Added to " + ", ".join(adds[:3])
+                elif trims:
+                    headline = "Trimmed " + ", ".join(trims[:3])
+                log.append({
+                    "date": pd.Timestamp(date).date().isoformat(),
+                    "headline": headline,
+                    "turnover": turnover,
+                    "buys": buys,
+                    "sells": sells,
+                    "adds": adds,
+                    "trims": trims,
+                    "holdings": sorted([{"ticker": k, "weight": v} for k, v in new_weights.items()], key=lambda x: x["weight"], reverse=True)[:15],
+                })
+                old_weights = new_weights
+
+        daily_return = 0
+        if old_weights and position > 0:
+            for ticker, weight in old_weights.items():
+                history = histories.get(ticker)
+                if history is None:
                     continue
                 try:
                     local_position = history.index.get_indexer([date], method="pad")[0]
@@ -1085,86 +1039,121 @@ def _simulate(rows: List[Dict[str, Any]], price_frame: pd.DataFrame, target_hold
                 close = history["Close"].astype(float)
                 today = _finite(close.iloc[local_position])
                 yesterday = _finite(close.iloc[local_position - 1])
-                if today is None or yesterday is None or yesterday == 0:
-                    continue
-                daily_return += weight * ((today / yesterday) - 1.0)
-        model_value *= 1.0 + daily_return
+                if today is not None and yesterday is not None and yesterday != 0:
+                    daily_return += weight * ((today / yesterday) - 1)
+
+        value *= 1 + daily_return
         benchmark_value = (_finite(benchmark_close.iloc[position]) or benchmark_start) / benchmark_start
-        benchmark_return = _finite(benchmark_returns.iloc[position]) or 0.0
-        model_values.append(model_value)
-        benchmark_values.append(benchmark_value)
+        benchmark_return = benchmark_close.pct_change().fillna(0).iloc[position]
+
         model_returns.append(daily_return)
-        benchmark_daily_returns.append(benchmark_return)
-        rebalance_marker = None
-        if rebalance_log and rebalance_log[-1]["date"] == pd.Timestamp(date).date().isoformat():
-            rebalance_marker = {"date": rebalance_log[-1]["date"], "headline": rebalance_log[-1]["headline"]}
-        series.append({"date": pd.Timestamp(date).date().isoformat(), "model": model_value - 1.0, "benchmark": benchmark_value - 1.0, "rebalance": rebalance_marker})
-    return {
-        "series": series,
-        "rebalance_log": rebalance_log[-16:],
-        "stats": {
-            "model_return": model_values[-1] - 1.0 if model_values else 0.0,
-            "benchmark_return": benchmark_values[-1] - 1.0 if benchmark_values else 0.0,
-            "model_volatility": _annualized_volatility(model_returns),
-            "benchmark_volatility": _annualized_volatility(benchmark_daily_returns),
-            "model_max_drawdown": _max_drawdown(model_values),
-            "benchmark_max_drawdown": _max_drawdown(benchmark_values),
-            "rebalance_count": len(rebalance_log),
-        },
-        "diagnostics": {"history_count": len(histories), "benchmark": BENCHMARK_TICKER},
+        benchmark_returns.append(float(benchmark_return))
+        marker = None
+        if log and log[-1]["date"] == pd.Timestamp(date).date().isoformat():
+            marker = {"date": log[-1]["date"], "headline": log[-1]["headline"]}
+        series.append({"date": pd.Timestamp(date).date().isoformat(), "model": value - 1, "benchmark": benchmark_value - 1, "rebalance": marker})
+
+    model_values = [point["model"] + 1 for point in series]
+    bench_values = [point["benchmark"] + 1 for point in series]
+
+    def max_dd(values: Sequence[float]) -> float:
+        peak = values[0] if values else 1
+        dd = 0
+        for item in values:
+            peak = max(peak, item)
+            if peak > 0:
+                dd = min(dd, (item - peak) / peak)
+        return dd
+
+    stats = {
+        "model_return": series[-1]["model"] if series else 0,
+        "benchmark_return": series[-1]["benchmark"] if series else 0,
+        "model_volatility": float(pd.Series(model_returns).std() * math.sqrt(252)) if len(model_returns) > 5 else 0,
+        "benchmark_volatility": float(pd.Series(benchmark_returns).std() * math.sqrt(252)) if len(benchmark_returns) > 5 else 0,
+        "model_max_drawdown": max_dd(model_values),
+        "benchmark_max_drawdown": max_dd(bench_values),
+        "rebalance_count": len(log),
     }
+    return {"series": series, "rebalance_log": log[-16:], "stats": stats, "diagnostics": {"history_count": len(histories)}}
 
 
 def _build_payload(target_holdings: int, max_tickers: int, tickers: Optional[str], min_score: float) -> Dict[str, Any]:
+    started_at = time.time()
     target_holdings = max(MIN_TARGET_HOLDINGS, min(MAX_TARGET_HOLDINGS, int(target_holdings)))
-    universe_key, ticker_list = _get_universe(tickers=tickers, max_tickers=max_tickers)
-    rows, price_frame = _build_rankings(ticker_list)
-    rows = [row for row in rows if (_finite(row.get("confluence_score")) or 0.0) >= min_score]
-    portfolio = _current_portfolio(rows, target_holdings=target_holdings)
+    universe_key, ticker_list = _get_universe(tickers, max_tickers)
+
+    price_frame = _download_history(ticker_list + [BENCHMARK_TICKER], period="2y")
+    benchmark_history = _slice_history(price_frame, BENCHMARK_TICKER)
+
+    technical_rows = []
+    for ticker in ticker_list:
+        row = _technical_row(ticker, _slice_history(price_frame, ticker), benchmark_history)
+        if row:
+            technical_rows.append(row)
+
+    technical_rows.sort(key=lambda row: row.get("fast_score") or 0, reverse=True)
+    profile_targets = [row["ticker"] for row in technical_rows[:MAX_FUNDAMENTAL_FETCH]]
+    profiles = _fetch_profiles_bounded(profile_targets)
+
+    rows = []
+    for row in technical_rows:
+        profile = profiles.get(row["ticker"]) or _neutral_profile(row["ticker"])
+        combined = _combine_row(row, profile)
+        if (combined.get("confluence_score") or 0) >= min_score:
+            rows.append(combined)
+
+    rows.sort(key=lambda row: row.get("confluence_score") or 0, reverse=True)
+
+    portfolio = _select_holdings(rows, target_holdings)
     holdings = portfolio["holdings"]
-    performance = _simulate(rows=rows[:max(50, target_holdings * 4)], price_frame=price_frame, target_holdings=target_holdings)
+
     sector_weights: Dict[str, float] = {}
     theme_weights: Dict[str, float] = {}
     for row in holdings:
-        weight = _finite(row.get("target_weight")) or 0.0
-        sector_weights[row.get("sector") or "Unknown"] = sector_weights.get(row.get("sector") or "Unknown", 0.0) + weight
-        theme_weights[row.get("theme") or "Other SMID growth"] = theme_weights.get(row.get("theme") or "Other SMID growth", 0.0) + weight
-    generated_at = datetime.utcnow().isoformat() + "Z"
-    return {
-        "generated_at": generated_at,
+        weight = row.get("target_weight") or 0
+        sector = row.get("sector") or "Unknown"
+        theme = row.get("theme") or "Other SMID growth"
+        sector_weights[sector] = sector_weights.get(sector, 0) + weight
+        theme_weights[theme] = theme_weights.get(theme, 0) + weight
+
+    performance = _simulate(rows, price_frame, target_holdings)
+
+    payload = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
         "cache_ttl_seconds": CACHE_TTL_SECONDS,
         "portfolio_type": "high_growth_smid",
+        "mode": "timeout_safe",
         "universe": universe_key,
         "requested_tickers": len(ticker_list),
+        "technical_candidates": len(technical_rows),
+        "fundamental_fetch_count": len(profile_targets),
         "ranked_candidates": len(rows),
         "target_holdings": target_holdings,
         "stock_exposure": portfolio["stock_exposure"],
         "cash_weight": portfolio["cash_weight"],
         "exposure_regime": portfolio["exposure_regime"],
-        "holdings": [{key: _clean(value) for key, value in row.items() if key != "raw_weight"} for row in holdings],
-        "top_candidates": [{key: _clean(value) for key, value in row.items() if key != "raw_weight"} for row in rows[:25]],
+        "holdings": [{k: _clean(v) for k, v in row.items() if k != "raw_weight"} for row in holdings],
+        "top_candidates": [{k: _clean(v) for k, v in row.items() if k != "raw_weight"} for row in rows[:25]],
         "sector_weights": {k: _clean(v) for k, v in sorted(sector_weights.items(), key=lambda p: p[1], reverse=True)},
         "theme_weights": {k: _clean(v) for k, v in sorted(theme_weights.items(), key=lambda p: p[1], reverse=True)},
         "trade_queue": [
             {
                 "ticker": row.get("ticker"),
                 "action": row.get("action"),
-                "target_weight": _clean(row.get("target_weight")),
-                "confluence_score": _clean(row.get("confluence_score")),
+                "target_weight": row.get("target_weight"),
+                "confluence_score": row.get("confluence_score"),
                 "reason": row.get("trade_reason"),
             }
             for row in holdings
-            if row.get("action") in ["Buy", "Hold", "Watch"]
         ],
         "performance": {
             "series": performance.get("series", []),
             "rebalance_log": performance.get("rebalance_log", []),
-            "stats": {key: _clean(value) for key, value in performance.get("stats", {}).items()},
+            "stats": {k: _clean(v) for k, v in performance.get("stats", {}).items()},
             "benchmark": BENCHMARK_TICKER,
         },
         "methodology": {
-            "title": "High-Growth SMID confluence model",
-            "objective": "Find SMID stocks where acceleration, margin inflection, FCF improvement, sponsorship, relative strength, base quality, and valuation sanity stack together.",
+            "title": "High-Growth SMID timeout-safe confluence model",
             "weights": {
                 "fundamentals": 26,
                 "technicals": 20,
@@ -1175,14 +1164,7 @@ def _build_payload(target_holdings: int, max_tickers: int, tickers: Optional[str
                 "catalyst": 6,
                 "base_quality": 4,
             },
-            "position_sizing": "Weights are proportional to confluence edge divided by volatility squared, then capped by single-stock, sector, and theme limits.",
-            "sell_rules": [
-                "Confluence score below 55",
-                "Technical score below 45",
-                "Loss of 50-day trend",
-                "ATR stop breach",
-                "Score deterioration without relative strength",
-            ],
+            "note": "The live request pre-screens technically, then fetches fundamentals only for top candidates to avoid user-facing timeouts.",
         },
         "risk_rules": {
             "target_holdings": target_holdings,
@@ -1192,23 +1174,31 @@ def _build_payload(target_holdings: int, max_tickers: int, tickers: Optional[str
             "atr_stop_multiple": ATR_STOP_MULTIPLE,
             "rebalance": "Weekly model rebalance; daily risk check.",
         },
+        "diagnostics": {
+            "runtime_seconds": round(time.time() - started_at, 2),
+            "fundamental_time_budget_seconds": FUNDAMENTAL_TIME_BUDGET_SECONDS,
+            "max_fundamental_fetch": MAX_FUNDAMENTAL_FETCH,
+        },
     }
+    return payload
 
 
 @router.get("")
 def get_smid_growth_portfolio(
     target_holdings: int = Query(default=DEFAULT_TARGET_HOLDINGS, ge=MIN_TARGET_HOLDINGS, le=MAX_TARGET_HOLDINGS),
-    min_score: float = Query(default=52, ge=0, le=100),
-    max_tickers: int = Query(default=120, ge=30, le=180),
+    min_score: float = Query(default=50, ge=0, le=100),
+    max_tickers: int = Query(default=DEFAULT_MAX_TICKERS, ge=20, le=100),
     refresh: bool = Query(default=False),
     tickers: Optional[str] = Query(default=None),
 ) -> Dict[str, Any]:
-    cache_key = f"smid-growth-v1:{target_holdings}:{min_score}:{max_tickers}:{tickers or ''}"
+    cache_key = f"smid-growth-timeout-safe-v1:{target_holdings}:{min_score}:{max_tickers}:{tickers or ''}"
+
     if not refresh:
         cached = _cache_get(cache_key)
         if cached is not None:
             return {**cached, "cached": True}
-    payload = _build_payload(target_holdings=target_holdings, max_tickers=max_tickers, tickers=tickers, min_score=min_score)
+
+    payload = _build_payload(target_holdings, max_tickers, tickers, min_score)
     payload["cached"] = False
     return _cache_set(cache_key, payload)
 
@@ -1218,19 +1208,13 @@ def get_smid_growth_status() -> Dict[str, Any]:
     return {
         "status": "ok",
         "route": "/api/smid-growth-portfolio",
+        "mode": "timeout_safe",
         "cache_ttl_seconds": CACHE_TTL_SECONDS,
+        "default_max_tickers": DEFAULT_MAX_TICKERS,
+        "max_fundamental_fetch": MAX_FUNDAMENTAL_FETCH,
+        "fundamental_time_budget_seconds": FUNDAMENTAL_TIME_BUDGET_SECONDS,
         "benchmark": BENCHMARK_TICKER,
-        "target_holdings_default": DEFAULT_TARGET_HOLDINGS,
         "universe_size": len(_dedupe(SMID_GROWTH_UNIVERSE)),
-        "market_cap_range": {"min": MIN_MARKET_CAP, "max": MAX_MARKET_CAP},
-        "returns": [
-            "holdings",
-            "top_candidates",
-            "performance.series",
-            "performance.stats",
-            "performance.rebalance_log",
-            "sector_weights",
-            "theme_weights",
-            "trade_queue",
-        ],
+        "expected_fresh_runtime": "25 to 55 seconds depending on Yahoo response time",
+        "expected_cached_runtime": "1 to 5 seconds",
     }
