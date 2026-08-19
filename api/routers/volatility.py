@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import json
+import os
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -13,47 +15,51 @@ from api.services.volatility_engine import (
 router = APIRouter(prefix="/api/volatility", tags=["volatility"])
 
 
-def _get_connection():
+def _database_url() -> Optional[str]:
+    return os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+
+
+def _decode_payload(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        return json.loads(value)
+    return dict(value)
+
+
+def _latest_postgres_snapshot() -> Optional[Dict[str, Any]]:
+    url = _database_url()
+    if not url:
+        return None
+
     try:
-        from api.db import get_connection
-    except Exception as exc:
-        raise RuntimeError(
-            "api.db.get_connection is required for Postgres snapshot reads. "
-            "Install the portfolio Postgres helper first or use live=true."
-        ) from exc
+        import psycopg
+        from psycopg.rows import dict_row
+    except Exception:
+        return None
 
-    return get_connection()
+    query = """
+        SELECT ts, spx, source_symbol, is_spy_fallback, regime, payload
+        FROM volatility_snapshots
+        ORDER BY ts DESC
+        LIMIT 1;
+    """
 
-
-def _latest_snapshot_from_db() -> Optional[Dict[str, Any]]:
-    with _get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                  ts,
-                  spx,
-                  source_symbol,
-                  is_spy_fallback,
-                  regime,
-                  payload
-                FROM volatility_snapshots
-                ORDER BY ts DESC
-                LIMIT 1
-                """
-            )
-            row = cur.fetchone()
+    try:
+        with psycopg.connect(url, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                row = cur.fetchone()
+    except Exception:
+        return None
 
     if not row:
         return None
 
-    payload = row.get("payload") or {}
-    if not isinstance(payload, dict):
-        payload = {"payload": payload}
-
+    payload = _decode_payload(row["payload"])
     payload["source"] = "postgres_snapshot"
     payload["snapshot"] = {
-        "ts": row["ts"].isoformat() if row.get("ts") else None,
+        "ts": row["ts"].isoformat() if hasattr(row["ts"], "isoformat") else str(row["ts"]),
         "spx": row.get("spx"),
         "source_symbol": row.get("source_symbol"),
         "is_spy_fallback": row.get("is_spy_fallback"),
@@ -63,31 +69,16 @@ def _latest_snapshot_from_db() -> Optional[Dict[str, Any]]:
 
 
 @router.get("/snapshot")
-def volatility_snapshot(
-    live: bool = Query(
-        default=False,
-        description="When false, returns latest Postgres snapshot. When true, rebuilds live from Yahoo.",
-    )
-) -> Dict[str, Any]:
+def volatility_snapshot(live: bool = Query(False)):
+    """
+    Default behavior is fast: read the latest published Postgres snapshot.
+    Add ?live=true only for admin/manual rebuilds from Yahoo.
+    """
     if not live:
-        try:
-            cached = _latest_snapshot_from_db()
-            if cached is not None:
-                return cached
-        except Exception:
-            # Fall through to live calculation if DB is not ready yet.
-            pass
+        cached = _latest_postgres_snapshot()
+        if cached is not None:
+            return cached
 
-    try:
-        payload = build_volatility_snapshot()
-        payload["source"] = "live_yahoo"
-        return payload
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-
-
-@router.get("/snapshot/live")
-def volatility_snapshot_live() -> Dict[str, Any]:
     try:
         payload = build_volatility_snapshot()
         payload["source"] = "live_yahoo"
@@ -97,54 +88,50 @@ def volatility_snapshot_live() -> Dict[str, Any]:
 
 
 @router.get("/history")
-def volatility_history(
-    limit: int = Query(default=50, ge=1, le=500)
-) -> Dict[str, Any]:
+def volatility_history(limit: int = Query(100, ge=1, le=500)):
+    url = _database_url()
+    if not url:
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
+
     try:
-        with _get_connection() as conn:
+        import psycopg
+        from psycopg.rows import dict_row
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="psycopg is not installed: " + str(exc))
+
+    query = """
+        SELECT
+            ts,
+            spx,
+            source_symbol,
+            is_spy_fallback,
+            iv_7d,
+            iv_14d,
+            iv_30d,
+            iv_60d,
+            spread_7d_14d,
+            spread_14d_30d,
+            spread_30d_60d,
+            regime
+        FROM volatility_snapshots
+        ORDER BY ts DESC
+        LIMIT %(limit)s;
+    """
+
+    try:
+        with psycopg.connect(url, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                      ts,
-                      spx,
-                      source_symbol,
-                      is_spy_fallback,
-                      iv_7d,
-                      iv_14d,
-                      iv_30d,
-                      iv_60d,
-                      spread_7d_14d,
-                      spread_14d_30d,
-                      spread_30d_60d,
-                      regime
-                    FROM volatility_snapshots
-                    ORDER BY ts DESC
-                    LIMIT %s
-                    """,
-                    (limit,),
-                )
+                cur.execute(query, {"limit": limit})
                 rows = cur.fetchall()
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
     return {
         "source": "postgres_snapshot",
-        "count": len(rows),
-        "items": [
+        "rows": [
             {
-                "ts": row["ts"].isoformat() if row.get("ts") else None,
-                "spx": row.get("spx"),
-                "source_symbol": row.get("source_symbol"),
-                "is_spy_fallback": row.get("is_spy_fallback"),
-                "iv_7d": row.get("iv_7d"),
-                "iv_14d": row.get("iv_14d"),
-                "iv_30d": row.get("iv_30d"),
-                "iv_60d": row.get("iv_60d"),
-                "spread_7d_14d": row.get("spread_7d_14d"),
-                "spread_14d_30d": row.get("spread_14d_30d"),
-                "spread_30d_60d": row.get("spread_30d_60d"),
-                "regime": row.get("regime"),
+                **dict(row),
+                "ts": row["ts"].isoformat() if hasattr(row["ts"], "isoformat") else str(row["ts"]),
             }
             for row in rows
         ],
@@ -152,9 +139,7 @@ def volatility_history(
 
 
 @router.get("/natr")
-def natr_only(
-    map_mode: str = Query("Both", pattern="^(Both|ATR length|Norm length)$")
-) -> Dict[str, Any]:
+def natr_only(map_mode: str = Query("Both", pattern="^(Both|ATR length|Norm length)$")):
     try:
         history = fetch_spx_history()
         return {
