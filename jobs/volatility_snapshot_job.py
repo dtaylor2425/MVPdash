@@ -1,3 +1,8 @@
+"""
+Persist one Macro Engine volatility snapshot to Postgres.
+Recommended Railway cron: */15 13-21 * * 1-5
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,10 +11,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT))
 
-from api.services.volatility_engine import build_volatility_snapshot
+try:
+    from api.services.volatility_engine import build_volatility_snapshot
+except Exception:
+    from volatility_engine import build_volatility_snapshot
 
 DDL = """
 CREATE TABLE IF NOT EXISTS volatility_snapshots (
@@ -26,12 +33,9 @@ CREATE TABLE IF NOT EXISTS volatility_snapshots (
     spread_30d_60d  DOUBLE PRECISION,
     natr_json       JSONB NOT NULL,
     regime          TEXT,
-    payload         JSONB NOT NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    payload         JSONB NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_volatility_snapshots_ts_desc
-    ON volatility_snapshots (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_volatility_snapshots_ts_desc ON volatility_snapshots (ts DESC);
 """
 
 INSERT = """
@@ -64,7 +68,6 @@ def main() -> None:
     iv = snap["implied_volatility"]
     curve = iv["curve"]
     spreads = iv["spreads"]
-
     params = {
         "ts": snap["timestamp"],
         "spx": snap["spx"],
@@ -81,19 +84,17 @@ def main() -> None:
         "regime": snap["divergence"]["regime"],
         "payload": json.dumps(snap),
     }
-
     with psycopg.connect(_database_url()) as conn:
-        with conn.cursor() as cur:
-            cur.execute(DDL)
-            cur.execute(INSERT, params)
+        conn.execute(DDL)
+        conn.execute(INSERT, params)
         conn.commit()
-
     print(json.dumps({
         "timestamp": snap["timestamp"],
         "spx": snap["spx"],
         "regime": snap["divergence"]["regime"],
         "source_symbol": iv["source_symbol"],
-        "source": "written_to_postgres",
+        "is_spy_fallback": iv["is_spy_fallback"],
+        "options_ok": snap["data_quality"]["options_ok"],
     }, indent=2))
 
 
