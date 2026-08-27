@@ -403,16 +403,54 @@ def _mark_failed(run_id: str, reason: str, diagnostics: Dict[str, Any]) -> None:
 
 
 def _publish_run(run_id: str) -> None:
+    """
+    Publish this run and make it the only active published run for the same
+    strategy/run_date.
+
+    This preserves older same-day rows, but flips is_published to FALSE so the
+    latest endpoint can safely pick the new official snapshot. It also prevents
+    unique-index failures when you manually rerun the job on the same date.
+    """
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE portfolio_runs SET status = 'published', is_published = TRUE, published_at = now() WHERE id = %s",
+                "SELECT strategy, run_date FROM portfolio_runs WHERE id = %s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise RuntimeError(f"Cannot publish missing run_id={run_id}")
+
+            strategy = row["strategy"]
+            run_date = row["run_date"]
+
+            cur.execute(
+                """
+                UPDATE portfolio_runs
+                SET is_published = FALSE
+                WHERE strategy = %s
+                  AND run_date = %s
+                  AND id <> %s
+                  AND status = 'published'
+                  AND is_published = TRUE
+                """,
+                (strategy, run_date, run_id),
+            )
+
+            cur.execute(
+                """
+                UPDATE portfolio_runs
+                SET status = 'published',
+                    is_published = TRUE,
+                    published_at = now()
+                WHERE id = %s
+                """,
                 (run_id,),
             )
         conn.commit()
 
 
-def _run_strategy(strategy: str, run_date: date, dry_run: bool) -> None:
+def _run_strategy(strategy: str, run_date: date, dry_run: bool) -> bool:
     print(f"[{strategy}] Building portfolio snapshot for {run_date.isoformat()}")
     previous = _load_latest_published(strategy)
     previous_payload = previous["payload"] if previous else None
@@ -434,7 +472,7 @@ def _run_strategy(strategy: str, run_date: date, dry_run: bool) -> None:
 
     if dry_run:
         print(json.dumps(diagnostics, indent=2))
-        return
+        return valid
 
     config = {
         **STRATEGY_CONFIGS[strategy]["config"],
@@ -457,11 +495,12 @@ def _run_strategy(strategy: str, run_date: date, dry_run: bool) -> None:
         reason = "; ".join(errors)
         _mark_failed(run_id, reason, diagnostics)
         print(f"[{strategy}] FAILED guardrails: {reason}")
-        return
+        return False
 
     _store_child_rows(run_id, payload, official)
     _publish_run(run_id)
     print(f"[{strategy}] Published {run_id}. Holdings={diagnostics['holding_count']} Turnover={official['turnover']:.2%}")
+    return True
 
 
 def main() -> None:
@@ -484,23 +523,36 @@ def main() -> None:
 
     strategies = list(STRATEGY_CONFIGS.keys()) if args.all else [args.strategy]
 
+    had_failure = False
+
     for strategy in strategies:
         try:
-            _run_strategy(strategy, run_date, args.dry_run)
+            published = _run_strategy(strategy, run_date, args.dry_run)
+            if not published:
+                had_failure = True
         except Exception as exc:
+            had_failure = True
             print(f"[{strategy}] ERROR: {exc}")
             if not args.dry_run:
-                _insert_run(
-                    strategy,
-                    run_date,
-                    _now_et(),
-                    "failed",
-                    False,
-                    STRATEGY_CONFIGS[strategy]["config"],
-                    {"strategy": strategy, "run_date": run_date.isoformat(), "error": str(exc)},
-                    {"error": str(exc)},
-                    str(exc),
-                )
+                try:
+                    _insert_run(
+                        strategy,
+                        run_date,
+                        _now_et(),
+                        "failed",
+                        False,
+                        STRATEGY_CONFIGS[strategy]["config"],
+                        {"strategy": strategy, "run_date": run_date.isoformat(), "error": str(exc)},
+                        {"error": str(exc)},
+                        str(exc),
+                    )
+                except Exception as insert_exc:
+                    print(f"[{strategy}] FAILED to record failure row: {insert_exc}")
+
+    if had_failure:
+        raise SystemExit(1)
+
+    print("Portfolio snapshot job completed successfully.")
 
 
 if __name__ == "__main__":
