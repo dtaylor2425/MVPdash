@@ -20,7 +20,8 @@ src/fx/
   frankfurter.py    Frankfurter client (fixings, cached to disk)
   fred_client.py    FRED fetch wrapper + validator (scripts/validate_fx_series.py)
   reer.py           BIS REER bulk CSV loader (optional component)
-  components.py     the 6 composite-score component calculators
+  policy_rates.py   BIS central bank policy rates bulk CSV loader (carry input + display)
+  components.py     the 5 composite-score component calculators
   scoring.py        cross-sectional z, winsorise, reweight, composite, pairs, flags
   reconciliation.py FX USD score vs the existing macro `dollar` signal
   breadth.py         section 4A: independent strength/breadth/attribution model
@@ -61,14 +62,33 @@ writes to disk — no extra network call), and every component lookup in
 `series_map.max_age_for()` before using it. A daily series older than 10 days,
 or a monthly one older than 120, is treated as unavailable, not stale-but-used.
 
-The spec's literal "no observation in the last 60 days for a daily or monthly
-series" is kept as the **validator's** rule (`fred_client.py`,
-`scripts/validate_fx_series.py`) — a single fixed number makes for an honest
-diagnostic report. It is deliberately *not* the same number the scoring
-engine uses, because 60 days flags routine OECD publication lag (verified:
-most `IRLTLT01*`/`IRSTCI01*` series run ~100 days behind on a normal month)
-as if it were a dead feed. Using 60 days for both would have dropped
-`carry`/`policyMomentum` for 8 of 10 currencies on every run.
+**UPDATE (fix-list item 1):** the validator (`fred_client._check_one`,
+`scripts/validate_fx_series.py`) previously used a separate, hardcoded 60-day
+rule for every series regardless of frequency — a well-intentioned "one
+honest number" idea that backfired: it reported 33 of 41 series as STALE,
+including nearly every OECD monthly `policy_rate`/`y10` series that
+`components.py` correctly treats as fine (normal ~100-day OECD lag, well
+inside the 120-day monthly allowance). That made `carry` look like 2/10
+coverage and `policyMomentum` 1/10, when the true (and now corrected) numbers
+are 10/10 and 10/10. The validator now imports `series_map.max_age_for()`
+directly — there is exactly one staleness definition, used everywhere.
+**Operational note:** the validator's per-series threshold is keyed off the
+FRED series ID, and `build_fx_fred_frame`'s disk cache (`data/cache/
+fred_fx.parquet`) is keyed off the *logical* column name (e.g. `EUR__y10`).
+Remapping a logical name to a different series ID (as below, for EUR) does
+not by itself invalidate old cached rows under that logical name — run once
+with `--no-cache` (or delete the parquet) after any series-ID remap, or the
+job will keep reading stale cached data under the new mapping's name until
+the next natural cache refresh.
+
+**EUR `y10` remap:** `IRLTLT01EZM156N` (OECD's Euro-area aggregate long
+rate) is a genuinely dead feed on FRED — verified 253+ days stale, beyond
+even the 120-day monthly allowance, unlike every other country's ~100-day-lag
+OECD series. Remapped to `IRLTLT01DEM156N` (German Bund 10y, OECD MEI, same
+~100-day lag as everyone else) — the conventional market benchmark for "the"
+euro long rate anyway, so this is a like-for-like substitution. This was the
+one remaining failure after the validator fix; `policyMomentum` coverage is
+now 10/10.
 
 **2. Several series IDs in the spec's own candidate table are dead or wrong;
 replacements were found and verified live against FRED on 2026-09-10** (see
@@ -85,17 +105,45 @@ replacements were found and verified live against FRED on 2026-09-10** (see
 - `EUR` CPI: switched to `CP0000EZ19M086NEST` (HICP index, live, ~2mo lag)
   from the OECD MEI family.
 
-**A systemic gap, not a bug:** OECD's MEI CPI feed on FRED for every scored
-currency except USD and EUR appears to have stopped updating around
-February 2025 (every candidate — `CPALTT01[CC]M659N`, the `*CPIALLMINMEI`
-family, and their quarterly counterparts for AUD/NZD — reads 500+ days stale
-for JPY/GBP/CHF/CAD/AUD/NZD/SEK/NOK/CNY). No free replacement was found.
-Given the 6-of-10 minimum, `macroVsMandate` and the real-carry sub-input
-correctly get dropped and reweighted on essentially every current run — the
-model is not guessing values for the missing 80%, per spec's own instruction
-never to silently fill. `meta.droppedComponents` and `meta.seriesHealth`
-report this plainly; re-run `scripts/validate_fx_series.py` periodically in
-case OECD resumes the feed or a replacement source appears.
+**A systemic gap, not a bug — and, as of fix-list item 2, no longer a sixth
+component at all.** OECD's MEI CPI feed on FRED for every scored currency
+except USD and EUR stopped updating around February 2025 (every candidate —
+`CPALTT01[CC]M659N`, the `*CPIALLMINMEI` family, and their quarterly
+counterparts for AUD/NZD — reads 500+ days stale for
+JPY/GBP/CHF/CAD/AUD/NZD/SEK/NOK/CNY). No free replacement was found. Given
+the 6-of-10 minimum, `macroVsMandate` would have been dropped and reweighted
+on essentially every run forever — permanently below the minimum is not the
+same failure mode section 4.2's per-run reweighting was built for, so it was
+removed from the model entirely rather than shipped as a component that's
+always dropped for 8 of 10 currencies: gone from `COMPONENTS` /
+`COMPONENT_WEIGHTS` (`src/fx/components.py`, `src/fx/scoring.py`), the
+remaining five weights rescaled by 100/80 (carry 31.25%, policyMomentum
+31.25%, termsOfTrade/trend/valuation 12.5% each). CPI YoY / CB target /
+mandate gap are still surfaced as unscored context via the `mandate` field,
+for USD and EUR only (the only two with live CPI).
+
+**Policy rates are money-market proxies, not announced rates — fixed via a
+third data source (fix-list item 5).** Every non-USD/EUR `policy_rate` in
+`FRED_SERIES` is an OECD money-market rate (`IRSTCI01*` call money/interbank,
+or `IR3TIB01*` 3m interbank) standing in for the announced central-bank rate
+— acceptable as a carry input, not as something labelled "policy rate"
+unqualified (this is why CHF read -0.04% and CAD read 2.27% instead of the
+SNB's and Bank of Canada's actual stated rates). `src/fx/policy_rates.py`
+adds the BIS "Central bank policy rates" bulk dataset
+(`https://data.bis.org/static/bulk/WS_CBPOL_csv_row.zip`, verified live and
+updating daily 2026-09-10) as a third source, parsed the same way as
+`reer.py` parses BIS's REER bulk file. All 10 scored currencies plus CNY
+resolve with a genuine daily central-bank rate. `components._policy_rate()`
+prefers this BIS series and falls back to the FRED money-market rate only if
+BIS has nothing fresh for that currency; every currency entry carries
+`policyRateIsProxy` / `policyRateInstrument` regardless of which source
+served it. The FRED money-market series are kept either way (still read by
+`carry()` as a fallback) — the spread between the two is a funding-stress
+signal worth having later.
+
+`meta.droppedComponents` and `meta.seriesHealth` report live component/series
+health plainly; re-run `scripts/validate_fx_series.py` periodically in case
+OECD resumes the CPI feed or a replacement source appears.
 
 **3. BIS REER bulk file:** the spec's assumed URL pattern
 (`www.bis.org/statistics/full_eer_d_csv_row.zip`) 404s. The live path is

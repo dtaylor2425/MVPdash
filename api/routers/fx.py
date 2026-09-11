@@ -185,12 +185,14 @@ def fx_breadth(
         snap = _latest_snapshot().get("breadth") or {}
         source = "embedded_snapshot"
 
-    entry = (snap.get("byBase") or {}).get(base)
-    if not entry or not entry.get("available", True):
-        raise HTTPException(
-            status_code=503,
-            detail="Breadth data unavailable. Run jobs/fx_snapshot_job.py first.",
-        )
+    # A missing/unavailable entry is real information, not an error -- return
+    # it with the explicit INSUFFICIENT_DATA verdict rather than a 503, so the
+    # caller can render "not enough data" instead of falling through to
+    # whatever its error handler does with a failed request (fix-list item 8).
+    entry = (snap.get("byBase") or {}).get(base) or {
+        "available": False,
+        "verdict": breadthmod.INSUFFICIENT_DATA,
+    }
     return {
         "universe": snap.get("universe", universe),
         "horizon": snap.get("horizon", horizon),

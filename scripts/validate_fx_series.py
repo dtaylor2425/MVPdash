@@ -2,8 +2,9 @@
 scripts/validate_fx_series.py  (spec section 3.3)
 
 Request every FRED series ID in src/fx/series_map.py and report OK / 404 / stale
-(no observation in the last 60 days). Run this before shipping a snapshot and as
-part of the ingest job.
+(no real observation within that series' own publication-frequency allowance --
+see STALE_DAYS in src/fx/series_map.py; normal OECD publication lag is not
+staleness). Run this before shipping a snapshot and as part of the ingest job.
 
     python scripts/validate_fx_series.py            # table + non-zero exit on any 404
     python scripts/validate_fx_series.py --json     # machine-readable
@@ -56,8 +57,8 @@ def main() -> int:
             print(f"\n{len(summary['failing'])} series FAILED to resolve — fix src/fx/series_map.py "
                   "and mark affected components unavailable until then.")
         if summary["stale"]:
-            print(f"{len(summary['stale'])} series are stale (>60d) — the component will be "
-                  "dropped and reweighted for the affected currencies.")
+            print(f"{len(summary['stale'])} series are stale (per their own publication-frequency "
+                  "threshold) — the component will be dropped and reweighted for the affected currencies.")
 
     return 1 if summary["failing"] else 0
 

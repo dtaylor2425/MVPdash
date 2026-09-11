@@ -21,10 +21,9 @@ import pandas as pd
 import requests
 
 from src.config import CACHE_DIR, FRED_API_KEY
-from src.fx.series_map import all_series_ids, confidence_for
+from src.fx.series_map import all_series_ids, confidence_for, max_age_for
 
 _FRED_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
-_STALE_DAYS = 60
 _TIMEOUT = 30
 
 
@@ -112,9 +111,10 @@ def _check_one(logical: str, series_id: str, api_key: str) -> SeriesCheck:
         return SeriesCheck(logical, series_id, conf, "stale", None, None, "no numeric observations")
     last = valid[0]["date"]
     age = (datetime.now(timezone.utc).date() - datetime.strptime(last, "%Y-%m-%d").date()).days
-    status = "stale" if age > _STALE_DAYS else "ok"
+    max_age = max_age_for(series_id)
+    status = "stale" if age > max_age else "ok"
     return SeriesCheck(logical, series_id, conf, status, last, age,
-                       "" if status == "ok" else f"last obs {last} is {age}d old")
+                       "" if status == "ok" else f"last obs {last} is {age}d old (>{max_age}d allowed)")
 
 
 def _is_json(resp: requests.Response) -> bool:

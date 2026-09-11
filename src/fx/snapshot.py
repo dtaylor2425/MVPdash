@@ -23,6 +23,7 @@ from src.fx import components as comp
 from src.fx import frankfurter as fxmod
 from src.fx.components import COMPONENTS, InputBundle
 from src.fx.fred_client import build_fx_fred_frame
+from src.fx.policy_rates import load_policy_rates
 from src.fx.reconciliation import build_reconciliation
 from src.fx.reer import load_reer
 from src.fx.scoring import (
@@ -123,8 +124,7 @@ def _read_text(components_payload: Dict[str, dict], flags: dict) -> str:
         return "Insufficient component data to form a read."
     labels = {
         "carry": "carry", "policyMomentum": "policy momentum",
-        "macroVsMandate": "inflation vs mandate", "termsOfTrade": "terms of trade",
-        "trend": "trend", "valuation": "valuation",
+        "termsOfTrade": "terms of trade", "trend": "trend", "valuation": "valuation",
     }
     top = [labels[c] for c, z in ranked[:2] if z > 0.15]
     drag = [labels[c] for c, z in ranked[::-1] if z < -0.15][:1]
@@ -172,11 +172,24 @@ def _currency_entry(
 
     # top-level raw macro fields
     ts = as_of
-    policy_logical = f"{ccy}__policy_rate"
-    policy = comp._asof(bundle.col(policy_logical), ts, comp._max_age(policy_logical))
+    policy, policy_is_proxy, policy_instrument = comp._policy_rate(bundle, ccy, ts)
     yld_series, _, yld_logical = comp._yield_series(bundle, ccy)
     y2 = comp._asof(yld_series, ts, comp._max_age(yld_logical))
     cpi = comp._cpi_yoy(bundle, ccy, ts)
+
+    # Mandate context (item 2): macroVsMandate was dropped as a scored
+    # component -- free CPI coverage only reaches USD and EUR. Surfaced here
+    # as unscored display-only context, for those two currencies only.
+    mandate = None
+    if ccy in ("USD", "EUR"):
+        target = CB_INFLATION_TARGET.get(ccy)
+        gap = (cpi - target) if (cpi is not None and target is not None) else None
+        mandate = {
+            "scored": False,
+            "cpiYoY": None if cpi is None else round(cpi, 2),
+            "cbTarget": target,
+            "gap": None if gap is None else round(gap, 2),
+        }
 
     change_1w = None
     if prev_week is not None and ccy in prev_week["composites"]:
@@ -195,8 +208,9 @@ def _currency_entry(
         "flags": flags,
         "policyRate": None if policy is None else round(policy, 3),
         "policyRateLabel": _policy_rate_label(ccy, policy),
-        "cpiYoY": None if cpi is None else round(cpi, 2),
-        "cbTarget": CB_INFLATION_TARGET.get(ccy),
+        "policyRateIsProxy": policy_is_proxy,
+        "policyRateInstrument": policy_instrument,
+        "mandate": mandate,
         "yield2y": None if y2 is None else round(y2, 3),
         "read": _read_text(components_payload, flags),
         "compositeZ": round(float(composite["z"]), 4),
@@ -211,7 +225,7 @@ def _currency_entry(
 
 def _cny_entry(bundle: InputBundle, as_of: pd.Timestamp) -> dict:
     ts = as_of
-    policy = comp._asof(bundle.col("CNY__policy_rate"), ts, comp._max_age("CNY__policy_rate"))
+    policy, policy_is_proxy, policy_instrument = comp._policy_rate(bundle, "CNY", ts)
     cpi = comp._cpi_yoy(bundle, "CNY", ts)
     return {
         "code": "CNY",
@@ -222,8 +236,9 @@ def _cny_entry(bundle: InputBundle, as_of: pd.Timestamp) -> dict:
         "rank": None,
         "policyRate": None if policy is None else round(policy, 3),
         "policyRateLabel": None if policy is None else f"{policy:.2f}%",
-        "cpiYoY": None if cpi is None else round(cpi, 2),
-        "cbTarget": None,
+        "policyRateIsProxy": policy_is_proxy,
+        "policyRateInstrument": policy_instrument,
+        "mandate": {"scored": False, "cpiYoY": None if cpi is None else round(cpi, 2), "cbTarget": None, "gap": None},
         "yield2y": None,
         "read": "Managed float. Data shown for context; a free-float model would "
                 "produce confident nonsense here.",
@@ -240,7 +255,8 @@ def build_bundle(use_cache: bool = True) -> InputBundle:
     fred = build_fx_fred_frame(use_cache=use_cache)
     fx = fxmod.default_history()
     reer = load_reer(use_cache=use_cache)
-    return InputBundle(fred=fred, fx=fx, reer=reer)
+    policy_rates = load_policy_rates(use_cache=use_cache)
+    return InputBundle(fred=fred, fx=fx, reer=reer, policy_rates=policy_rates)
 
 
 def build_fx_snapshot(
@@ -332,6 +348,13 @@ def build_fx_snapshot(
             "droppedComponents": dropped_components,
             "componentAvailability": component_availability,
             "methodology": {
+                "components": "five components -- carry, policyMomentum, termsOfTrade, trend, "
+                              "valuation. A sixth, inflation-vs-mandate (macroVsMandate), was "
+                              "excluded from scoring entirely: free G10 CPI coverage isn't "
+                              "available (the OECD MEI CPI feed is dead on FRED for every scored "
+                              "currency except USD and EUR), so it could only ever score 2 of 10 "
+                              "currencies. CPI YoY / CB target / mandate gap are still shown as "
+                              "unscored context for USD and EUR (`mandate` field per currency).",
                 "zScore": "cross-sectional across the 10 scored currencies per component "
                           "per date; winsorised at ±2.5σ; component dropped and reweighted "
                           "below 6 valid currencies",
@@ -342,6 +365,11 @@ def build_fx_snapshot(
                 "proxies": "policyMomentum uses Δ2y government yield as an OIS-path proxy; "
                            "non-USD carry/momentum fall back to the 10y yield where no 2y "
                            "series exists; trend uses static trade-weights",
+                "policyRates": "every non-USD/EUR `policyRate` is a money-market rate (call "
+                               "money/interbank or 3m interbank) standing in for an announced "
+                               "central-bank rate -- see `policyRateIsProxy` / "
+                               "`policyRateInstrument` per currency; usable as a carry input, "
+                               "not a substitute for the announced rate",
                 "fixings": "Frankfurter returns daily central-bank reference fixings, not live "
                            "quotes; observationDate carries the fixing date",
             },

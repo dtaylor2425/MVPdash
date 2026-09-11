@@ -142,6 +142,15 @@ def main() -> int:
     incomplete = payload["meta"]["incompleteCurrencies"]
     dropped = payload["meta"]["droppedComponents"]
 
+    # Cross-section size per component, every run (fix-list item 4) -- the
+    # minimum-coverage guard (scoring.MIN_CURRENCIES_PER_COMPONENT) drops a
+    # component below 6, but a component sitting at 6-8 is worth watching
+    # even when it isn't dropped.
+    availability = payload["meta"]["componentAvailability"]
+    for name, ccys in availability.items():
+        flag = " *** DROPPED (below minimum)" if name in dropped else ""
+        print(f"[fx] cross-section {name:<14} {len(ccys)}/10 currencies{flag}")
+
     print(json.dumps({
         "asOf": payload["asOf"],
         "observationDate": payload["observationDate"],
@@ -149,6 +158,7 @@ def main() -> int:
         "ranking": [(c["code"], c["score"]) for c in payload["currencies"] if c.get("scored")],
         "incompleteCurrencies": incomplete,
         "droppedComponents": dropped,
+        "componentCrossSectionSizes": {k: len(v) for k, v in availability.items()},
         "pairCount": len(payload["pairs"]),
         "reconciliation": payload["reconciliation"]["agreement"],
         "publishable": ok,

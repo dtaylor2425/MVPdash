@@ -53,11 +53,18 @@ def build_reconciliation(fx_usd_score: Optional[float], fred: pd.DataFrame) -> d
     macro = macro_dollar_signal(fred)
     agreement = "unknown"
     z = macro.get("zscore")
-    if fx_usd_score is not None and z is not None:
+    has_data = fx_usd_score is not None and z is not None
+    if has_data:
         divergent = (fx_usd_score > _FX_HIGH and z < 0) or (fx_usd_score < _FX_LOW and z > 0)
         agreement = "divergent" if divergent else "aligned"
     return {
         "fxUsdScore": None if fx_usd_score is None else round(fx_usd_score),
         "macroDollarSignal": macro,
         "agreement": agreement,
+        # Explicit gate for any "the forecast and the tape disagree"-style
+        # callout (fix-list item 8): that comparison may only be shown when
+        # BOTH models have data. agreement == "unknown" already means one
+        # side is missing, but a consumer must not need to know that --
+        # check this flag, not agreement != "aligned".
+        "calloutEligible": has_data,
     }

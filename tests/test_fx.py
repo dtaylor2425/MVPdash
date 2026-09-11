@@ -31,8 +31,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.fx.components import InputBundle
+from src.fx.components import COMPONENTS, InputBundle
 from src.fx.frankfurter import FxData
+from src.fx.reconciliation import build_reconciliation
 from src.fx.scoring import (
     COMPONENT_WEIGHTS,
     composite_scores,
@@ -220,6 +221,62 @@ def test_reconciliation_shape():
 
 def test_weights_metadata_sums_to_one():
     assert abs(sum(_PAYLOAD["meta"]["componentWeights"].values()) - 1.0) < 1e-9
+
+
+def test_five_active_components_no_mandate():
+    # fix-list item 2/3: macroVsMandate dropped entirely, exactly five
+    # components remain, and there is no stray "momentum" key anywhere.
+    assert COMPONENTS == ["carry", "policyMomentum", "termsOfTrade", "trend", "valuation"]
+    assert "macroVsMandate" not in COMPONENTS
+    assert "momentum" not in COMPONENTS
+    assert set(COMPONENT_WEIGHTS) == set(COMPONENTS)
+    assert abs(sum(COMPONENT_WEIGHTS.values()) - 1.0) < 1e-9
+    for ccy_entry in _SCORED_ENTRIES:
+        assert set(ccy_entry["components"]) == set(COMPONENTS)
+        assert "macroVsMandate" not in ccy_entry
+        assert "momentum" not in ccy_entry["components"]
+
+
+def test_mandate_context_usd_eur_only():
+    for c in _PAYLOAD["currencies"]:
+        if c["code"] in ("USD", "EUR"):
+            assert c["mandate"] is not None
+            assert c["mandate"]["scored"] is False
+        else:
+            assert c["mandate"] is None or c["mandate"].get("scored") is False
+
+
+def test_eur_y10_remapped_off_dead_ea_aggregate():
+    # fix-list item 1: the Euro-area aggregate OECD series (IRLTLT01EZM156N)
+    # is a dead feed on FRED (253d+ stale, verified 2026-09-10); EUR's y10
+    # must be remapped to a fresh national proxy, not left on the dead one.
+    assert FRED_SERIES["EUR"]["y10"] != "IRLTLT01EZM156N"
+    assert FRED_SERIES["EUR"]["y10"]
+
+
+def test_policy_rate_provenance_fields_present():
+    for c in _SCORED_ENTRIES:
+        assert "policyRateIsProxy" in c
+        assert "policyRateInstrument" in c
+        if c["policyRate"] is not None:
+            assert c["policyRateInstrument"]
+
+
+def test_reconciliation_callout_gate():
+    # fix-list item 8: the cross-model callout may only fire when both
+    # models have data -- calloutEligible must be false whenever either
+    # side is missing, and true only when agreement is a real verdict.
+    both = build_reconciliation(58.0, pd.DataFrame({"macro__dollar_broad": [100.0] * 40}))
+    assert both["calloutEligible"] is True
+    assert both["agreement"] in ("aligned", "divergent")
+
+    no_tape = build_reconciliation(58.0, pd.DataFrame())
+    assert no_tape["calloutEligible"] is False
+    assert no_tape["agreement"] == "unknown"
+
+    no_fx = build_reconciliation(None, pd.DataFrame({"macro__dollar_broad": [100.0] * 40}))
+    assert no_fx["calloutEligible"] is False
+    assert no_fx["agreement"] == "unknown"
 
 
 def test_history_present():

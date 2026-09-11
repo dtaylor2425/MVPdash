@@ -20,13 +20,15 @@ import numpy as np
 from src.fx.components import COMPONENTS
 from src.fx.series_map import INTERVENTION_WATCH, SCORED
 
+# Five active components. macroVsMandate (originally 20%) was dropped entirely
+# (see src/fx/components.py) -- the remaining five weights are the original
+# ones each scaled by 100/80 so they still sum to 1.0.
 COMPONENT_WEIGHTS: Dict[str, float] = {
-    "carry": 0.25,
-    "policyMomentum": 0.25,
-    "macroVsMandate": 0.20,
-    "termsOfTrade": 0.10,
-    "trend": 0.10,
-    "valuation": 0.10,
+    "carry": 0.3125,
+    "policyMomentum": 0.3125,
+    "termsOfTrade": 0.125,
+    "trend": 0.125,
+    "valuation": 0.125,
 }
 
 MIN_CURRENCIES_PER_COMPONENT = 6      # spec 4.2

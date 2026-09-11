@@ -1,8 +1,9 @@
 """
 src/fx/components.py
 
-The six per-currency component calculators (spec section 4.1). Each returns a
-dict {currency -> ComponentValue}:
+The five per-currency component calculators (spec section 4.1; a sixth,
+macroVsMandate, was dropped -- see the note above termsOfTrade below). Each
+returns a dict {currency -> ComponentValue}:
 
     {"raw": float | None,      # the pre-z quantity, in natural units
      "proxy": bool,            # computed from a proxy series?
@@ -25,12 +26,13 @@ import pandas as pd
 
 from src.fx import frankfurter as fxmod
 from src.fx.series_map import (
-    CB_INFLATION_TARGET,
     FRED_SERIES,
     SCORED,
+    STALE_DAYS,
     TERMS_OF_TRADE_BASKET,
     TREND_PARTNER_WEIGHTS,
     logical_max_age,
+    policy_rate_provenance,
 )
 
 _MAX_AGE = logical_max_age()
@@ -39,7 +41,7 @@ _MAX_AGE = logical_max_age()
 def _max_age(logical: str) -> int:
     return _MAX_AGE.get(logical, 120)
 
-COMPONENTS = ["carry", "policyMomentum", "macroVsMandate", "termsOfTrade", "trend", "valuation"]
+COMPONENTS = ["carry", "policyMomentum", "termsOfTrade", "trend", "valuation"]
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +52,11 @@ class InputBundle:
     fred: pd.DataFrame
     fx: "fxmod.FxData"
     reer: Dict[str, pd.Series] = field(default_factory=dict)
+    # BIS-announced central bank policy rates (src/fx/policy_rates.py), keyed
+    # by ISO currency. Preferred over the FRED money-market proxy in
+    # FRED_SERIES[ccy]["policy_rate"] wherever available -- see carry() and
+    # snapshot._currency_entry.
+    policy_rates: Dict[str, pd.Series] = field(default_factory=dict)
 
     def col(self, logical: str) -> pd.Series:
         if logical in self.fred.columns:
@@ -138,31 +145,53 @@ def _cpi_yoy(b: InputBundle, ccy: str, ts: pd.Timestamp) -> Optional[float]:
     return _yoy(b.col(logical), ts, m.get("cpi_kind", "index"), _max_age(logical))
 
 
+def _policy_rate(b: InputBundle, ccy: str, ts: pd.Timestamp):
+    """
+    Return (rate, is_proxy, instrument_label). Prefers the BIS-announced
+    central bank policy rate (src/fx/policy_rates.py); falls back to the
+    FRED money-market rate in FRED_SERIES when BIS has nothing fresh for
+    this currency (fix-list item 5 -- the FRED rate is a real proxy, not the
+    announced rate, for every currency except USD/EUR).
+    """
+    bis_series = b.policy_rates.get(ccy)
+    if bis_series is not None and not bis_series.empty:
+        val = _asof(bis_series, ts, STALE_DAYS["daily"])
+        if val is not None:
+            return val, False, "central bank policy rate"
+    policy_logical = f"{ccy}__policy_rate"
+    fred_series_id = FRED_SERIES.get(ccy, {}).get("policy_rate")
+    val = _asof(b.col(policy_logical), ts, _max_age(policy_logical))
+    provenance = policy_rate_provenance(fred_series_id)
+    return val, provenance["isProxy"], provenance["instrument"]
+
+
 # ---------------------------------------------------------------------------
 # 1. carry -- policy rate; 2y yield; real policy rate (policy - YoY CPI)
 # ---------------------------------------------------------------------------
 def carry(b: InputBundle, ts: pd.Timestamp) -> Dict[str, dict]:
     out: Dict[str, dict] = {}
     for ccy in SCORED:
-        policy_logical = f"{ccy}__policy_rate"
-        policy = _asof(b.col(policy_logical), ts, _max_age(policy_logical))
-        yld_series, is_proxy, yld_logical = _yield_series(b, ccy)
+        policy, policy_is_proxy, policy_instrument = _policy_rate(b, ccy, ts)
+        yld_series, yld_is_proxy, yld_logical = _yield_series(b, ccy)
         yld = _asof(yld_series, ts, _max_age(yld_logical))
         cpi = _cpi_yoy(b, ccy, ts)
         real_policy = (policy - cpi) if (policy is not None and cpi is not None) else None
 
         parts = [p for p in (policy, yld, real_policy) if p is not None]
+        is_proxy = bool(policy_is_proxy or yld_is_proxy)
         if not parts:
             out[ccy] = _blank(proxy=is_proxy)
             continue
         out[ccy] = {
             "raw": float(np.mean(parts)),
-            "proxy": bool(is_proxy),
+            "proxy": is_proxy,
             "available": True,
             "detail": {
                 "policyRate": policy,
+                "policyRateIsProxy": policy_is_proxy,
+                "policyRateInstrument": policy_instrument,
                 "yield": yld,
-                "yieldIsProxy": is_proxy,
+                "yieldIsProxy": yld_is_proxy,
                 "realPolicyRate": real_policy,
                 "cpiYoY": cpi,
             },
@@ -198,28 +227,19 @@ def policy_momentum(b: InputBundle, ts: pd.Timestamp) -> Dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# 3. macroVsMandate -- CPI YoY vs that central bank's own target
+# termsOfTrade -- export-weighted commodity basket return, 3m
+#
+# NOTE: a sixth component, macroVsMandate (CPI YoY vs central-bank target),
+# was dropped from the model entirely -- not just at runtime. The OECD MEI CPI
+# feed on FRED is dead for every scored currency except USD and EUR (verified;
+# 528-618 days stale), so the component could only ever score 2 of 10
+# currencies -- permanently below the 6-currency minimum. Free G10 CPI
+# coverage sufficient to score isn't available, so shipping this as a
+# sometimes-scored sixth component would mean shipping a component that's
+# always dropped for 8 of 10 currencies. CPI YoY / CB target / mandate gap are
+# still surfaced as unscored display-only context for USD and EUR in
+# src/fx/snapshot.py (`mandate` field).
 # ---------------------------------------------------------------------------
-def macro_vs_mandate(b: InputBundle, ts: pd.Timestamp) -> Dict[str, dict]:
-    out: Dict[str, dict] = {}
-    for ccy in SCORED:
-        cpi = _cpi_yoy(b, ccy, ts)
-        target = CB_INFLATION_TARGET.get(ccy)
-        if cpi is None or target is None:
-            out[ccy] = _blank()
-            continue
-        # Above target -> central bank leans hawkish -> currency-supportive.
-        out[ccy] = {
-            "raw": float(cpi - target),
-            "proxy": False,
-            "available": True,
-            "detail": {"cpiYoY": cpi, "cbTarget": target, "gap": cpi - target},
-        }
-    return out
-
-
-# ---------------------------------------------------------------------------
-# 4. termsOfTrade -- export-weighted commodity basket return, 3m
 # ---------------------------------------------------------------------------
 def terms_of_trade(b: InputBundle, ts: pd.Timestamp) -> Dict[str, dict]:
     returns_3m: Dict[str, Optional[float]] = {}
@@ -324,7 +344,6 @@ def valuation(b: InputBundle, ts: pd.Timestamp) -> Dict[str, dict]:
 _CALCULATORS = {
     "carry": carry,
     "policyMomentum": policy_momentum,
-    "macroVsMandate": macro_vs_mandate,
     "termsOfTrade": terms_of_trade,
     "trend": trend,
     "valuation": valuation,

@@ -118,6 +118,22 @@ def test_history_present():
     assert len(entry.get("share", [])) >= 6
 
 
+def test_insufficient_data_verdict_never_alongside_real_one():
+    # fix-list item 8: INSUFFICIENT_DATA must be returned INSTEAD OF a real
+    # verdict when inputs are missing, never alongside one.
+    real = {"BASE_DRIVEN", "BASE_PLUS_STRESS", "OTHERS_MOVING", "QUIET_MIXED"}
+    too_short = _L.iloc[:5]  # far fewer rows than DEFAULT_HORIZON
+    entry = bd.base_metrics(too_short, bd.strengths_frame(too_short), "USD", _UNIVERSE)
+    assert entry["available"] is False
+    assert entry["verdict"] == bd.INSUFFICIENT_DATA
+    assert entry["verdict"] not in real
+
+    single_currency = ["USD"]
+    entry2 = bd.base_metrics(_L, _S, "USD", single_currency)
+    assert entry2["available"] is False
+    assert entry2["verdict"] == bd.INSUFFICIENT_DATA
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

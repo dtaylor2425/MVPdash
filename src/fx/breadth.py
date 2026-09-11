@@ -96,6 +96,14 @@ def latest_strengths(S: pd.DataFrame) -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 # verdict taxonomy (4A.4)
 # ---------------------------------------------------------------------------
+# INSUFFICIENT_DATA is not part of the four real verdicts below -- it is
+# returned instead of them (never alongside) whenever breadth inputs are
+# missing or the cross-section is too small to derive one (fix-list item 8).
+# A caller must never fall through to a real verdict's else-branch just
+# because the inputs to compute one were absent.
+INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+
+
 def _verdict(breadth: int, share: float, m: int) -> str:
     extreme = abs(breadth) >= max(m - 1, 0)
     if extreme and share >= 0.5:
@@ -121,7 +129,7 @@ def base_metrics(
 ) -> dict:
     others = [c for c in universe if c != base and c in L.columns]
     if base not in L.columns or len(others) < 2 or len(L) <= horizon:
-        return {"available": False}
+        return {"available": False, "verdict": INSUFFICIENT_DATA}
 
     # x_i(t) = log(base/other_i) = L(base,t) - L(other_i,t) -- identical whether
     # read off L directly or off strengths S (the per-date constant cancels).

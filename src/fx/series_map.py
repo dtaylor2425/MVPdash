@@ -83,7 +83,14 @@ FRED_SERIES: Dict[str, Dict[str, Optional[str]]] = {
     "EUR": {
         "policy_rate": "ECBDFR",             # High -- ECB deposit facility rate, live daily
         "y2": None,
-        "y10": "IRLTLT01EZM156N",            # Low  -- OECD, runs ~8mo behind
+        "y10": "IRLTLT01DEM156N",            # Low -- German Bund 10y (OECD MEI), ~3mo lag,
+                                              #        same as every other country's monthly
+                                              #        feed. The EA-aggregate IRLTLT01EZM156N
+                                              #        is a genuinely dead feed on FRED (last
+                                              #        print 253d+ old, verified 2026-09-10) --
+                                              #        Bunds are the conventional euro long-rate
+                                              #        benchmark anyway, so this is a like-for-
+                                              #        like substitution, not a downgrade.
         "cpi": "CP0000EZ19M086NEST",         # Medium -- HICP index, live monthly
         "cpi_kind": "index",
     },
@@ -271,6 +278,30 @@ TREND_PARTNER_WEIGHTS: Dict[str, Dict[str, float]] = {
 # Currencies whose authorities actively manage FX -- hard-coded intervention
 # watch (spec section 4.4).
 INTERVENTION_WATCH = {"JPY", "CHF"}
+
+# ---------------------------------------------------------------------------
+# Policy-rate provenance (spec section on carry inputs / item 5 of the FX
+# fix list): every non-USD/EUR `policy_rate` above is actually an OECD
+# money-market rate standing in for an announced central-bank rate, because
+# OECD's own "Central Bank Policy Rates" (IRSTCB01) feed was not found free
+# and live for these currencies. That is acceptable as a carry input but must
+# never be labelled "policy rate" unqualified in anything user-facing --
+# classify by FRED ID prefix so callers can flag it.
+# ---------------------------------------------------------------------------
+_POLICY_RATE_PROXY_PREFIXES = {
+    "IRSTCI01": "call money / interbank rate",
+    "IR3TIB01": "3-month interbank rate",
+}
+
+
+def policy_rate_provenance(series_id: Optional[str]) -> Dict[str, object]:
+    """{"isProxy": bool, "instrument": str | None} for a policy_rate series ID."""
+    if not series_id:
+        return {"isProxy": False, "instrument": None}
+    for prefix, label in _POLICY_RATE_PROXY_PREFIXES.items():
+        if series_id.startswith(prefix):
+            return {"isProxy": True, "instrument": label}
+    return {"isProxy": False, "instrument": "central bank policy rate"}
 
 
 def confidence_for(series_id: Optional[str]) -> str:
