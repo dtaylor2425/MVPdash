@@ -231,7 +231,10 @@ def compute_breadth_snapshot(
         for base in universe
     }
 
-    history: Dict[str, dict] = {c: {"share": [], "breadth": [], "cumulativeAD": []} for c in universe}
+    history: Dict[str, dict] = {
+        c: {"share": [], "breadth": [], "cumulativeAD": [], "rms": [], "trendShare": [], "crosses": []}
+        for c in universe
+    }
     grid = _month_ends(L_full.index[-1], history_months)
     for ts in grid:
         sub = L_full[L_full.index <= ts]
@@ -246,6 +249,15 @@ def compute_breadth_snapshot(
             history[base]["share"].append({"date": d_iso, "value": m["share"]})
             history[base]["breadth"].append({"date": d_iso, "value": m["breadth"]})
             history[base]["cumulativeAD"].append({"date": d_iso, "value": m["cumulativeAD"]})
+            # rms/trendShare/crosses were already computed by base_metrics()
+            # above at every iteration and simply discarded here before --
+            # this is the one gap noted in docs/FX-PROJECT-STATUS.md: the
+            # frontend's cross heatmap and the rms/trendShare chart lines
+            # need per-date history, not just the latest-date scalar/list
+            # every other field in this loop already gets.
+            history[base]["rms"].append({"date": d_iso, "value": m["rms"]})
+            history[base]["trendShare"].append({"date": d_iso, "value": m["trendShare"]})
+            history[base]["crosses"].append({"date": d_iso, "crosses": m["crosses"]})
 
     return {
         "universe": universe_name,

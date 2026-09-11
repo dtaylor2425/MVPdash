@@ -118,6 +118,26 @@ def test_history_present():
     assert len(entry.get("share", [])) >= 6
 
 
+def test_history_carries_rms_trendshare_and_crosses():
+    # Cross heatmap / rms / trendShare charts need per-date history, not
+    # just the latest-date scalar -- these three were previously computed
+    # every loop iteration and discarded (see docs/FX-PROJECT-STATUS.md).
+    entry = _SNAP["history"].get("USD", {})
+    assert len(entry.get("rms", [])) == len(entry.get("share", []))
+    assert len(entry.get("trendShare", [])) == len(entry.get("share", []))
+    assert len(entry.get("crosses", [])) == len(entry.get("share", []))
+
+    for point in entry["rms"]:
+        assert "date" in point and "value" in point
+        assert point["value"] is None or point["value"] >= 0
+
+    latest = entry["crosses"][-1]
+    assert "date" in latest and isinstance(latest["crosses"], list)
+    assert {c["quote"] for c in latest["crosses"]} == set(_UNIVERSE) - {"USD"}
+    for c in latest["crosses"]:
+        assert set(c) >= {"quote", "move", "fromBase", "fromQuote", "baseShare"}
+
+
 def test_insufficient_data_verdict_never_alongside_real_one():
     # fix-list item 8: INSUFFICIENT_DATA must be returned INSTEAD OF a real
     # verdict when inputs are missing, never alongside one.
