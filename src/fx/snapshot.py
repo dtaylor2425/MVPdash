@@ -314,11 +314,23 @@ def build_fx_snapshot(
     reconciliation = build_reconciliation(usd_score, bundle.fred)
 
     # --- breadth & attribution (spec 4A) -- independent model, own failure domain
+    #
+    # Embedded as the full "g10" universe (all 10 scored currencies), not the
+    # "majors" default: the API's /api/fx/breadth route can only recompute a
+    # different universe on demand if it finds a live Frankfurter disk cache
+    # (frankfurter.load_cached()), and in this deployment the ingest job and
+    # the API service are separate Railway resources that do not share a
+    # filesystem -- that cache is never present in the API process. This
+    # embedded snapshot is therefore the ONLY breadth data that reliably
+    # reaches any consumer in production, so it must cover every scored
+    # currency, not just the 7-currency "majors" subset (SEK/NOK/NZD would
+    # otherwise have no breadth data at all -- see docs/FX-BACKEND-
+    # IMPLEMENTATION.md).
     try:
-        breadth = breadthmod.compute_breadth_snapshot(bundle.fx)
+        breadth = breadthmod.compute_breadth_snapshot(bundle.fx, universe_name="g10")
     except Exception as exc:  # never let this block the composite snapshot
         breadth = {
-            "universe": breadthmod.DEFAULT_UNIVERSE, "horizon": breadthmod.DEFAULT_HORIZON,
+            "universe": "g10", "horizon": breadthmod.DEFAULT_HORIZON,
             "trendWindow": breadthmod.DEFAULT_TREND_WINDOW, "threshold": breadthmod.DEFAULT_THRESHOLD,
             "strengths": {}, "byBase": {}, "history": {}, "error": str(exc),
         }
