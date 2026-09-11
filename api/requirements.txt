@@ -7,3 +7,4 @@ fredapi
 pyarrow
 scipy
 anthropic
+requests
