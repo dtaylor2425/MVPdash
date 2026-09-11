@@ -42,18 +42,35 @@ def build_fx_fred_frame(use_cache: bool = True) -> pd.DataFrame:
     Reuses src.data_sources.get_fred_cached for the actual network fetch,
     disk caching and cache-merge (so behaviour matches the rest of the repo),
     then reads back the pre-ffill parquet it writes to disk.
+
+    The disk cache (data/cache/fred_fx.parquet) is a single flat frame keyed
+    by column name, and get_fred_cached's merge logic only knows about column
+    names -- it has no idea a logical name's underlying FRED series ID ever
+    changes. Fetched/cached columns are therefore keyed by "{logical}::{sid}",
+    not the bare logical name: remapping a logical name to a different series
+    ID (series_map.py) produces a brand-new column, so the cache
+    self-invalidates on remap instead of silently merging old observations
+    from the previous series into what looks like the new one. The old
+    column is simply abandoned in the parquet (harmless, ignored). Renamed
+    back to plain logical names before returning, since every consumer
+    (components.py, snapshot.py) looks up bare logical names.
     """
     from src.data_sources import fetch_fred, get_fred_cached
     from src.storage import read_parquet
 
     flat = all_series_ids()
-    if not use_cache:
-        return fetch_fred(flat, FRED_API_KEY).sort_index()
+    keyed = {f"{logical}::{sid}": sid for logical, sid in flat.items()}
 
-    get_fred_cached(flat, FRED_API_KEY, CACHE_DIR, cache_name="fred_fx")  # fetch + write raw cache
-    raw = read_parquet(CACHE_DIR, "fred_fx")
-    if raw is None or raw.empty:
-        return pd.DataFrame()
+    if not use_cache:
+        raw = fetch_fred(keyed, FRED_API_KEY)
+    else:
+        get_fred_cached(keyed, FRED_API_KEY, CACHE_DIR, cache_name="fred_fx")  # fetch + write raw cache
+        raw = read_parquet(CACHE_DIR, "fred_fx")
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+
+    rename = {composite: composite.split("::", 1)[0] for composite in keyed if composite in raw.columns}
+    raw = raw.rename(columns=rename)[list(rename.values())]
     raw.index = pd.to_datetime(raw.index)
     return raw.sort_index()
 
