@@ -138,31 +138,71 @@ def _ticker(row: Dict[str, Any]) -> str:
     return str(_first(row, ["ticker", "symbol", "asset"], "") or "").upper().strip()
 
 
-def _call_dynamic(func: Any, candidates: List[Dict[str, Any]]) -> Any:
-    last_error: Optional[Exception] = None
-    for kwargs in candidates:
-        try:
-            signature = inspect.signature(func)
-            accepts_kwargs = any(
-                p.kind == inspect.Parameter.VAR_KEYWORD
-                for p in signature.parameters.values()
-            )
-            if accepts_kwargs:
-                result = func(**kwargs)
-            else:
-                allowed = {k: v for k, v in kwargs.items() if k in signature.parameters}
-                result = func(**allowed)
+def _required_params(signature: inspect.Signature) -> List[str]:
+    """Parameter names with no default that must be supplied by keyword."""
+    required = []
+    for name, param in signature.parameters.items():
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+        if param.default is inspect.Parameter.empty:
+            required.append(name)
+    return required
 
+
+def _call_dynamic(func: Any, candidates: List[Dict[str, Any]]) -> Any:
+    """
+    Try each candidate kwargs dict against func.
+
+    Candidates that cannot satisfy every required parameter are skipped before
+    the call, rather than being invoked and allowed to raise TypeError. Without
+    that check the last (usually emptiest) candidate raises, and its
+    "missing N required positional arguments" message masks the real failure
+    from the earlier, more complete candidates.
+    """
+    signature = inspect.signature(func)
+    accepts_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in signature.parameters.values()
+    )
+    required = _required_params(signature)
+
+    errors: List[str] = []
+    skipped: List[str] = []
+
+    for kwargs in candidates:
+        if accepts_kwargs:
+            allowed = dict(kwargs)
+        else:
+            allowed = {k: v for k, v in kwargs.items() if k in signature.parameters}
+
+        missing = [name for name in required if name not in allowed]
+        if missing:
+            skipped.append(
+                "{%s} missing required: %s" % (", ".join(sorted(allowed)), ", ".join(missing))
+            )
+            continue
+
+        try:
+            result = func(**allowed)
             if inspect.isawaitable(result):
                 return asyncio.run(result)
             return result
         except Exception as exc:
-            last_error = exc
+            errors.append("%s(%s) -> %s: %s" % (
+                getattr(func, "__name__", "func"),
+                ", ".join(sorted(allowed)),
+                type(exc).__name__,
+                exc,
+            ))
 
-    if last_error:
-        raise last_error
-
-    return func()
+    detail = "; ".join(errors) if errors else "; ".join(skipped)
+    raise RuntimeError(
+        "%s could not be called. Signature is (%s). Attempts: %s" % (
+            getattr(func, "__name__", "func"),
+            ", ".join(signature.parameters),
+            detail or "no candidates supplied",
+        )
+    )
 
 
 def _load_universe(rankings_module: Any, universe: str, max_tickers: int, tickers: Optional[List[str]]) -> Optional[List[str]]:
@@ -173,7 +213,13 @@ def _load_universe(rankings_module: Any, universe: str, max_tickers: int, ticker
     if not get_universe:
         return None
 
+    # The real _get_universe(universe, tickers, max_tickers) requires all three.
+    # `tickers` is always falsy here (a truthy value returns above), so pass an
+    # explicit None rather than omitting the parameter.
     candidates = [
+        {"universe": universe, "tickers": None, "max_tickers": max_tickers},
+        {"name": universe, "tickers": None, "max_tickers": max_tickers},
+        {"universe": universe, "symbols": None, "max_tickers": max_tickers},
         {"universe": universe, "max_tickers": max_tickers},
         {"name": universe, "max_tickers": max_tickers},
         {"universe": universe},
