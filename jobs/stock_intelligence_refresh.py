@@ -218,6 +218,8 @@ def _load_universe(rankings_module: Any, universe: str, max_tickers: int, ticker
     # explicit None rather than omitting the parameter.
     candidates = [
         {"universe": universe, "tickers": None, "max_tickers": max_tickers},
+        {"universe_key": universe, "tickers": None, "max_tickers": max_tickers},
+        {"universe_key": universe, "tickers": None},
         {"name": universe, "tickers": None, "max_tickers": max_tickers},
         {"universe": universe, "symbols": None, "max_tickers": max_tickers},
         {"universe": universe, "max_tickers": max_tickers},
@@ -277,7 +279,25 @@ def _scan_rankings(
 
     universe_tickers = _load_universe(rankings_module, universe, max_tickers, tickers)
 
+    # The live signature is _scan_rankings(universe_key, tickers, limit, min_score).
+    # Note: `universe_key`, not `universe`; and it takes neither `max_tickers`
+    # nor `refresh`. Candidates below lead with that exact shape, then fall back
+    # to older/alternative spellings for forward compatibility.
     candidates = [
+        {
+            "universe_key": universe,
+            "tickers": universe_tickers,
+            "limit": limit,
+            "min_score": min_score,
+        },
+        {
+            "universe_key": universe,
+            "tickers": universe_tickers,
+            "limit": limit,
+            "min_score": min_score,
+            "max_tickers": max_tickers,
+            "refresh": True,
+        },
         {
             "universe": universe,
             "tickers": universe_tickers,
@@ -292,6 +312,12 @@ def _scan_rankings(
             "max_tickers": max_tickers,
             "min_score": min_score,
             "refresh": True,
+        },
+        {
+            "universe_name": universe,
+            "tickers": universe_tickers,
+            "limit": limit,
+            "min_score": min_score,
         },
         {
             "tickers": universe_tickers,
