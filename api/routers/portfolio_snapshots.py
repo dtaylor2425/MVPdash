@@ -1,13 +1,29 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from api.auth_deps import optional_account
 from api.db import get_connection
 
 router = APIRouter(prefix="/api/portfolio-snapshots", tags=["portfolio-snapshots"])
 VALID_STRATEGIES = {"stock_alpha", "smid_growth", "etf_macro"}
+
+
+def _truncate_for_anon(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """holdings + exposure, no rebalance log (matrix: /api/portfolio/*).
+    This is the payload actually served to /dashboard/portfolio, so it needs
+    the same treatment as the live /api/stock-portfolio and /api/portfolio
+    compute endpoints — see platform-backend-accounts-build memory."""
+    out = dict(payload)
+    performance = dict(payload.get("performance") or {})
+    if "rebalance_log" in performance:
+        performance["rebalance_log"] = []
+        out["performance"] = performance
+    out["official_rebalance_log"] = []
+    out["truncated"] = True
+    return out
 
 
 def _validate_strategy(strategy: str) -> str:
@@ -80,7 +96,10 @@ def _row_to_payload(row: Dict[str, Any], official_log: List[Dict[str, Any]]) -> 
 
 
 @router.get("/latest")
-def get_latest_portfolio_snapshot(strategy: str = Query(default="stock_alpha")) -> Dict[str, Any]:
+def get_latest_portfolio_snapshot(
+    strategy: str = Query(default="stock_alpha"),
+    user: Optional[Dict[str, Any]] = Depends(optional_account),
+) -> Dict[str, Any]:
     strategy = _validate_strategy(strategy)
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -104,7 +123,11 @@ def get_latest_portfolio_snapshot(strategy: str = Query(default="stock_alpha")) 
             status_code=404,
             detail=f"No published snapshot for {strategy}. Run jobs/nightly_portfolio_refresh.py first.",
         )
-    return _row_to_payload(row, _official_rebalance_log(strategy))
+    payload = _row_to_payload(row, _official_rebalance_log(strategy))
+    if user is None:
+        return _truncate_for_anon(payload)
+    payload["truncated"] = False
+    return payload
 
 
 @router.get("/history")
@@ -148,7 +171,10 @@ def get_portfolio_snapshot_history(
 
 
 @router.get("/run/{run_id}")
-def get_portfolio_snapshot_run(run_id: str) -> Dict[str, Any]:
+def get_portfolio_snapshot_run(
+    run_id: str,
+    user: Optional[Dict[str, Any]] = Depends(optional_account),
+) -> Dict[str, Any]:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -165,7 +191,11 @@ def get_portfolio_snapshot_run(run_id: str) -> Dict[str, Any]:
 
     if not row:
         raise HTTPException(status_code=404, detail="Portfolio snapshot run not found.")
-    return _row_to_payload(row, _official_rebalance_log(row["strategy"]))
+    payload = _row_to_payload(row, _official_rebalance_log(row["strategy"]))
+    if user is None:
+        return _truncate_for_anon(payload)
+    payload["truncated"] = False
+    return payload
 
 
 @router.get("/status")

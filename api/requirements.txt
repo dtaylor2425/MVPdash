@@ -8,3 +8,5 @@ pyarrow
 scipy
 anthropic
 requests
+psycopg[binary]>=3.2
+python-multipart

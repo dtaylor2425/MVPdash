@@ -15,6 +15,8 @@ from api.routers.portfolio_snapshots import router as portfolio_snapshots_router
 from api.routers.volatility import router as volatility_router
 from api.routers.stock_intelligence_snapshots import router as stock_intelligence_snapshots_router
 from api.routers.fx import router as fx_router
+from api.routers.auth import router as auth_router
+from api.routers.admin import router as admin_router
 
 
 try:
@@ -36,7 +38,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://www.macro-engine.com","https://macro-engine.com",
                    "http://localhost:3000","http://127.0.0.1:3000"],
-    allow_credentials=True, allow_methods=["GET"], allow_headers=["*"],
+    allow_credentials=True, allow_methods=["GET", "POST"], allow_headers=["*"],
 )
 
 app.include_router(regime.router,   prefix="/api")
@@ -53,6 +55,8 @@ app.include_router(portfolio_snapshots_router)
 app.include_router(volatility_router)
 app.include_router(stock_intelligence_snapshots_router)
 app.include_router(fx_router)
+app.include_router(auth_router)
+app.include_router(admin_router)
 if portfolio:  app.include_router(portfolio.router, prefix="/api")
 if screener:   app.include_router(screener.router,  prefix="/api")
 if playbook:   app.include_router(playbook.router,  prefix="/api")

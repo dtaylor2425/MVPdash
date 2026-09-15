@@ -1,12 +1,23 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from api.auth_deps import optional_account
 from api.db import get_connection
 
 router = APIRouter(prefix="/api/stock-intelligence-snapshots", tags=["stock-intelligence-snapshots"])
+ANON_ROW_LIMIT = 10  # matrix: anonymous sees top 10, registered sees full list
+
+
+def _truncate_for_anon(payload: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(payload)
+    full_rows = payload.get("rows") or []
+    out["total"] = len(full_rows)
+    out["rows"] = full_rows[:ANON_ROW_LIMIT]
+    out["truncated"] = len(full_rows) > ANON_ROW_LIMIT
+    return out
 
 
 def _row_to_payload(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -34,7 +45,9 @@ def _row_to_payload(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.get("/latest")
-def latest_stock_intelligence_snapshot() -> Dict[str, Any]:
+def latest_stock_intelligence_snapshot(
+    user: Optional[Dict[str, Any]] = Depends(optional_account),
+) -> Dict[str, Any]:
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -56,7 +69,11 @@ def latest_stock_intelligence_snapshot() -> Dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="No published stock intelligence snapshot found.")
 
-    return _row_to_payload(row)
+    payload = _row_to_payload(row)
+    if user is None:
+        return _truncate_for_anon(payload)
+    payload["truncated"] = False
+    return payload
 
 
 @router.get("/history")

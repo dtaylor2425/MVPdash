@@ -20,13 +20,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from api.auth_deps import optional_account
 
 router = APIRouter(prefix="/api/stock-rankings", tags=["stock-rankings"])
 _CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 CACHE_TTL_SECONDS = 45 * 60
 MAX_WORKERS = 8
 MAX_LIMIT = 50
+ANON_ROW_LIMIT = 10  # matrix: anonymous sees top 10, registered sees full list
 
 QUALITY_UNIVERSE = [
     "AAPL","MSFT","NVDA","AMZN","GOOGL","META","AVGO","LLY","JPM","V","MA","COST","NFLX","ORCL","CRM","NOW","AMD","ADBE","INTU",
@@ -307,15 +310,34 @@ def get_stock_rankings(
     max_tickers: int = Query(default=90, ge=10, le=160),
     refresh: bool = Query(default=False),
     tickers: Optional[str] = Query(default=None),
+    user: Optional[Dict[str, Any]] = Depends(optional_account),
 ) -> Dict[str, Any]:
     key, ticker_list = _get_universe(universe, tickers, max_tickers)
     cache_key = f"stock-rankings:{key}:{','.join(ticker_list)}:{limit}:{min_score}:{max_tickers}"
     if not refresh:
         cached = _cache_get(cache_key)
-        if cached is not None: return {**cached, 'cached': True}
-    payload = _scan_rankings(key, ticker_list, limit, min_score)
-    payload['cached'] = False
-    return _cache_set(cache_key, payload, CACHE_TTL_SECONDS)
+        if cached is not None:
+            payload = {**cached, 'cached': True}
+        else:
+            payload = None
+    else:
+        payload = None
+    if payload is None:
+        payload = _scan_rankings(key, ticker_list, limit, min_score)
+        payload['cached'] = False
+        payload = _cache_set(cache_key, payload, CACHE_TTL_SECONDS)
+
+    payload = dict(payload)  # never mutate the shared cached object
+    if user is None:
+        full_rows = payload.get('rows', [])
+        payload['total'] = len(full_rows)
+        payload['rows'] = full_rows[:ANON_ROW_LIMIT]
+        payload['returned_rows'] = len(payload['rows'])
+        payload['truncated'] = len(full_rows) > ANON_ROW_LIMIT
+    else:
+        payload['truncated'] = False
+
+    return payload
 
 @router.get('/status')
 def get_stock_rankings_status() -> Dict[str, Any]:

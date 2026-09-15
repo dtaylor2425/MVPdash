@@ -19,15 +19,17 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.fx import breadth as breadthmod
 from src.fx import frankfurter as fxmod
+from api.auth_deps import optional_account, require_account
 
 router = APIRouter(prefix="/api/fx", tags=["fx"])
 
 _DISK_SNAPSHOT = Path("data/cache/fx_snapshot_latest.json")
 _STALE_AFTER_DAYS = 8  # weekly refresh + slack
+_ANON_CURRENCY_LIMIT = 5  # matrix: anonymous sees first 5 currencies, no pairs
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +109,22 @@ def _latest_snapshot() -> Dict[str, Any]:
 # routes
 # ---------------------------------------------------------------------------
 @router.get("/snapshot")
-def fx_snapshot() -> Dict[str, Any]:
-    return _latest_snapshot()
+def fx_snapshot(user: Optional[Dict[str, Any]] = Depends(optional_account)) -> Dict[str, Any]:
+    snap = dict(_latest_snapshot())
+    if user is None:
+        currencies = snap.get("currencies", [])
+        snap["total"] = len(currencies)
+        snap["currencies"] = currencies[:_ANON_CURRENCY_LIMIT]
+        snap.pop("pairs", None)
+        snap["truncated"] = True
+    else:
+        snap["total"] = len(snap.get("currencies", []))
+        snap["truncated"] = False
+    return snap
 
 
 @router.get("/currency/{code}")
-def fx_currency(code: str) -> Dict[str, Any]:
+def fx_currency(code: str, user: Optional[Dict[str, Any]] = Depends(optional_account)) -> Dict[str, Any]:
     code = (code or "").upper().strip()
     snap = _latest_snapshot()
     entry = next((c for c in snap.get("currencies", []) if c.get("code") == code), None)
@@ -125,7 +137,7 @@ def fx_currency(code: str) -> Dict[str, Any]:
     out["observationDate"] = snap.get("observationDate")
     out["stale"] = snap.get("stale", False)
     out["source"] = snap.get("source")
-    if entry.get("scored"):
+    if entry.get("scored") and user is not None:
         out["pairs"] = _mirror_for_base(snap.get("pairs", []), code)
         out["reconciliation"] = snap.get("reconciliation") if code == "USD" else None
     out["meta"] = {
@@ -136,7 +148,10 @@ def fx_currency(code: str) -> Dict[str, Any]:
 
 
 @router.get("/pairs")
-def fx_pairs(base: str = Query(..., description="Base currency, e.g. USD")) -> Dict[str, Any]:
+def fx_pairs(
+    base: str = Query(..., description="Base currency, e.g. USD"),
+    user: Dict[str, Any] = Depends(require_account),
+) -> Dict[str, Any]:
     base = (base or "").upper().strip()
     snap = _latest_snapshot()
     universe = snap.get("meta", {}).get("universe", [])
@@ -158,6 +173,7 @@ def fx_breadth(
     universe: str = Query(breadthmod.DEFAULT_UNIVERSE, pattern="^(majors|g10)$"),
     trend_window: int = Query(breadthmod.DEFAULT_TREND_WINDOW, ge=5, le=252, alias="trendWindow"),
     threshold: float = Query(breadthmod.DEFAULT_THRESHOLD, ge=0.0, le=0.1),
+    user: Dict[str, Any] = Depends(require_account),
 ) -> Dict[str, Any]:
     """
     Breadth & attribution (spec 4A) -- an independent model from /snapshot's

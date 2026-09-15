@@ -30,7 +30,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from api.auth_deps import optional_account
 
 try:
     from api.routers.stock_rankings import (
@@ -1260,6 +1262,16 @@ def _build_portfolio(
     }
 
 
+def _truncate_for_anon(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """holdings + exposure, no rebalance log (matrix: /api/portfolio/*)."""
+    out = dict(payload)
+    performance = dict(payload.get("performance", {}))
+    performance["rebalance_log"] = []
+    out["performance"] = performance
+    out["truncated"] = True
+    return out
+
+
 @router.get("")
 def get_stock_portfolio(
     universe: str = Query(default="quality"),
@@ -1268,6 +1280,7 @@ def get_stock_portfolio(
     max_tickers: int = Query(default=95, ge=20, le=160),
     refresh: bool = Query(default=False),
     tickers: Optional[str] = Query(default=None),
+    user: Optional[Dict[str, Any]] = Depends(optional_account),
 ) -> Dict[str, Any]:
     cache_key = (
         f"stock-portfolio-living-v1:{universe}:{target_holdings}:{min_score}:"
@@ -1278,22 +1291,28 @@ def get_stock_portfolio(
         cached = _cache_get(cache_key)
 
         if cached is not None:
-            return {
-                **cached,
-                "cached": True,
-            }
+            payload = {**cached, "cached": True}
+        else:
+            payload = None
+    else:
+        payload = None
 
-    payload = _build_portfolio(
-        universe=universe,
-        tickers=tickers,
-        max_tickers=max_tickers,
-        target_holdings=target_holdings,
-        min_score=min_score,
-    )
+    if payload is None:
+        payload = _build_portfolio(
+            universe=universe,
+            tickers=tickers,
+            max_tickers=max_tickers,
+            target_holdings=target_holdings,
+            min_score=min_score,
+        )
+        payload["cached"] = False
+        payload = _cache_set(cache_key, payload, CACHE_TTL_SECONDS)
 
-    payload["cached"] = False
-
-    return _cache_set(cache_key, payload, CACHE_TTL_SECONDS)
+    if user is None:
+        return _truncate_for_anon(payload)
+    payload = dict(payload)
+    payload["truncated"] = False
+    return payload
 
 
 @router.get("/status")

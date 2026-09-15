@@ -9,10 +9,13 @@ Macro Momentum Rotation:
 """
 
 import time, threading, json
+from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from api.auth_deps import optional_account
 
 router = APIRouter(tags=["Portfolio"])
 
@@ -286,17 +289,35 @@ def _run_backtest():
 
 
 @router.get("/portfolio")
-def portfolio_full():
+def portfolio_full(user: Optional[Dict[str, Any]] = Depends(optional_account)):
     with _lock:
         if "data" in _cache and (time.time() - _cache.get("ts", 0)) < _TTL:
-            return _cache["data"]
+            result = _cache["data"]
+        else:
+            result = None
 
-    result = _run_backtest()
     if result is None:
-        raise HTTPException(status_code=503, detail="Portfolio computation failed — price data unavailable")
+        result = _run_backtest()
+        if result is None:
+            raise HTTPException(status_code=503, detail="Portfolio computation failed — price data unavailable")
+        with _lock:
+            _cache["data"] = result
+            _cache["ts"] = time.time()
 
-    with _lock:
-        _cache["data"] = result
-        _cache["ts"] = time.time()
-
+    if user is None:
+        return _truncate_for_anon(result)
+    result = dict(result)
+    result["truncated"] = False
     return result
+
+
+def _truncate_for_anon(result: dict) -> dict:
+    """holdings + exposure, no rebalance log (matrix: /api/portfolio/*)."""
+    out = dict(result)
+    out["variants"] = {}
+    for name, variant in result.get("variants", {}).items():
+        v = dict(variant)
+        v.pop("rebalances", None)
+        out["variants"][name] = v
+    out["truncated"] = True
+    return out
