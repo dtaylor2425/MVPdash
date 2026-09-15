@@ -239,6 +239,23 @@ def _load_universe(rankings_module: Any, universe: str, max_tickers: int, ticker
             if isinstance(value, list):
                 return [str(x).upper().strip() for x in value if str(x).strip()]
         return None
+
+    # The real api.routers.stock_rankings._get_universe returns
+    # (universe_key, ticker_list), e.g. ('quality', ['AAPL', 'MSFT', ...]) --
+    # not a flat list of tickers. Unwrap that specific 2-tuple shape before
+    # falling through to "this result IS the flat ticker list" below.
+    # Without this, iterating the raw tuple yields exactly two "tickers":
+    # the universe key string ("QUALITY") and the ticker list stringified
+    # into one bogus symbol ("['AAPL', 'MSFT', ...]") -- both 404 against
+    # yfinance, which is the failure seen in production.
+    if (
+        isinstance(result, tuple)
+        and len(result) == 2
+        and isinstance(result[0], str)
+        and isinstance(result[1], (list, tuple, set))
+    ):
+        result = result[1]
+
     if isinstance(result, (list, tuple, set)):
         return [str(x).upper().strip() for x in result if str(x).strip()]
 
