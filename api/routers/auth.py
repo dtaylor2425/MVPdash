@@ -32,12 +32,19 @@ re-derived later:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
+import time
 from datetime import date, timedelta
 from typing import Any, Dict, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
+import requests
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 
 from api.auth_deps import SESSION_COOKIE_NAME, SESSION_TTL_DAYS, optional_account, require_account
 from api.db import get_connection
@@ -56,6 +63,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 LOGIN_TOKEN_TTL_MINUTES = int(os.getenv("LOGIN_TOKEN_TTL_MINUTES", "15"))
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:3000")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 ADMIN_EMAILS = {
     normalize_email(e) for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()
 }
@@ -64,6 +72,16 @@ RATE_LIMIT_PER_EMAIL = 3
 RATE_LIMIT_EMAIL_WINDOW = timedelta(minutes=15)
 RATE_LIMIT_PER_IP = 10
 RATE_LIMIT_IP_WINDOW = timedelta(hours=1)
+
+# --- Google OAuth (added on top of the original plan; magic-link is unaffected) ---
+# Not in docs/PLATFORM-BACKEND-PLAN-V2.md or the frontend spec (which explicitly
+# said "no social buttons") -- added per direct user request 2026-09-15 as a
+# second sign-in path alongside magic-link, not a replacement.
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI") or (API_BASE_URL.rstrip("/") + "/api/auth/google/callback")
+SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes; only needs to survive the consent screen
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +122,41 @@ def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(**kwargs)
 
 
-def _log_event(conn, email: Optional[str], event: str, ip: str, detail: Optional[Dict[str, Any]] = None) -> None:
-    import json
+def _sign_oauth_state(next_path: str) -> str:
+    """Binds `next` to a signed, expiring token so the Google redirect chain
+    can't be used for CSRF (a forged callback hit) or an open redirect (a
+    tampered `next`) — same threat model as request-link's `next` guard, but
+    this has to survive a real browser round-trip through Google instead of
+    living in one fetch call, so it's carried in `state` instead of a cookie
+    or server-side session."""
+    payload = json.dumps({"n": generate_login_token(), "next": next_path, "exp": int(time.time()) + OAUTH_STATE_TTL_SECONDS})
+    payload_b64 = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    sig = hmac.new(SESSION_SECRET.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+    return "{}.{}".format(payload_b64, sig)
 
+
+def _verify_oauth_state(state: str) -> Optional[str]:
+    """Returns the validated `next` path, or None if missing/tampered/expired."""
+    if not state or "." not in state:
+        return None
+    payload_b64, _, sig = state.partition(".")
+    expected_sig = hmac.new(SESSION_SECRET.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        return None
+    try:
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except Exception:
+        return None
+    if payload.get("exp", 0) < time.time():
+        return None
+    next_path = payload.get("next") or "/account"
+    if not next_path.startswith("/") or next_path.startswith("//"):
+        next_path = "/account"
+    return next_path
+
+
+def _log_event(conn, email: Optional[str], event: str, ip: str, detail: Optional[Dict[str, Any]] = None) -> None:
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO auth_events (email, event, ip, detail) VALUES (%s, %s, %s, %s)",
@@ -309,6 +359,116 @@ def auth_callback(request: Request, response: Response, token: str = "") -> Dict
 
     _set_session_cookie(response, session_id)
     return payload
+
+
+@router.get("/google")
+def google_login(next: str = Query(default="/account")) -> RedirectResponse:
+    login_url = APP_BASE_URL.rstrip("/") + "/login"
+
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET or not SESSION_SECRET:
+        return RedirectResponse("{}?error=google_unconfigured".format(login_url), status_code=302)
+
+    next_path = next if (next.startswith("/") and not next.startswith("//")) else "/account"
+    state = _sign_oauth_state(next_path)
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "prompt": "select_account",
+    }
+    return RedirectResponse(
+        "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params),
+        status_code=302,
+    )
+
+
+@router.get("/google/callback")
+def google_callback(request: Request, code: str = "", state: str = "", error: str = "") -> RedirectResponse:
+    """Full-page redirect chain, not a fetch target — Google redirects the
+    browser here directly, so failures redirect to /login?error=... (for the
+    frontend to render) rather than returning JSON, and success redirects
+    straight to `next` with the session cookie already set. Contrast with
+    GET /callback (magic-link), which returns JSON because the frontend
+    calls that one via fetch()."""
+    ip = _client_ip(request)
+    login_url = APP_BASE_URL.rstrip("/") + "/login"
+
+    if error:
+        return RedirectResponse("{}?error=google_denied".format(login_url), status_code=302)
+
+    next_path = _verify_oauth_state(state)
+    if next_path is None:
+        return RedirectResponse("{}?error=state_invalid".format(login_url), status_code=302)
+
+    if not code:
+        return RedirectResponse("{}?error=google_failed".format(login_url), status_code=302)
+
+    try:
+        token_resp = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=10,
+        )
+        token_resp.raise_for_status()
+        access_token = token_resp.json().get("access_token")
+        if not access_token:
+            raise ValueError("no access_token in Google's response")
+
+        # Bearer call to Google's own endpoint -- Google authenticates the
+        # token for us, so there's no JWT/JWKS verification to reimplement.
+        profile_resp = requests.get(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            headers={"Authorization": "Bearer {}".format(access_token)},
+            timeout=10,
+        )
+        profile_resp.raise_for_status()
+        profile = profile_resp.json()
+    except Exception as e:
+        print("[auth] google token exchange failed: {}".format(e))
+        return RedirectResponse("{}?error=google_failed".format(login_url), status_code=302)
+
+    email_raw = str(profile.get("email") or "")
+    email = normalize_email(email_raw)
+    if not profile.get("email_verified") or not is_valid_email(email):
+        return RedirectResponse("{}?error=email_unverified".format(login_url), status_code=302)
+
+    try:
+        with get_connection() as conn:
+            # Same users table, keyed by email, as magic-link -- a Google
+            # sign-in with an email that already has a magic-link account
+            # lands on that same account automatically. No linking step.
+            user = _get_or_create_user(conn, email, email_raw)
+            user = _maybe_promote_admin(conn, user)
+
+            session_id = new_id()
+            session_expiry = utcnow() + timedelta(days=SESSION_TTL_DAYS)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sessions (id, user_id, expires_at, last_seen_at, user_agent)
+                    VALUES (%s, %s, %s, now(), %s)
+                    """,
+                    (session_id, user["id"], session_expiry, request.headers.get("user-agent", "")),
+                )
+                cur.execute("UPDATE users SET last_login_at = now() WHERE id = %s", (user["id"],))
+
+            _log_event(conn, email, "login", ip, {"method": "google"})
+            conn.commit()
+    except Exception as e:
+        print("[auth] google callback error: {}".format(e))
+        return RedirectResponse("{}?error=server_error".format(login_url), status_code=302)
+
+    redirect = RedirectResponse(APP_BASE_URL.rstrip("/") + next_path, status_code=302)
+    _set_session_cookie(redirect, session_id)
+    return redirect
 
 
 @router.post("/logout")
