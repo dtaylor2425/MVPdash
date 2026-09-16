@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.macro_thesis import engine, history, thesis_text
+from src.macro_thesis import confirmation, engine, history, thesis_text
 
 
 def test_assign_quadrant_signs():
@@ -42,14 +42,83 @@ def test_round_to_step_handles_negative_values():
 
 
 def test_trigger_units_are_scaled_not_raw():
-    # hy_oas raw units are percentage points (2.76 == 276bp); a trigger of
-    # "HY OAS above 50bp" from a raw value of 2.76 would be the unit bug
-    # this test guards against.
-    row = {"hy_oas": 2.76, "init_claims_level": 224000.0, "i_breakeven_10y": 2.35, "curve_2s10s": -0.18}
-    triggers = thesis_text.top_triggers(row, n=4)
-    assert any("300bp" in t for t in triggers), triggers
-    assert not any("50bp" in t for t in triggers), triggers
-    assert any("225k" in t for t in triggers), triggers
+    # init_claims_level raw units are persons (224000), not thousands; a
+    # trigger of "initial claims above 224000k" would be the unit bug this
+    # test guards against.
+    row = {"init_claims_level": 224000.0, "i_breakeven_10y": 2.35}
+    t = thesis_text._axis_trigger("growth", False, row)  # False = growth negative = claims rising
+    assert "225k" in t, t
+    assert "224000k" not in t, t
+
+
+def test_scenario_triggers_are_quadrant_specific_not_shared():
+    """The bug the user and the frontend session both found independently:
+    every scenario emitted the literal same trigger string regardless of
+    which quadrant it was describing. Reflation and Deflation are opposite
+    outcomes from Goldilocks and must never share a directional trigger."""
+    row = {"init_claims_level": 224000.0, "i_breakeven_10y": 2.35}
+    t_reflation = thesis_text.build_scenario_trigger("GOLDILOCKS", "REFLATION", row)
+    t_deflation = thesis_text.build_scenario_trigger("GOLDILOCKS", "DEFLATION", row)
+    t_stagflation = thesis_text.build_scenario_trigger("GOLDILOCKS", "STAGFLATION", row)
+    assert t_reflation != t_deflation
+    assert t_reflation != t_stagflation
+    assert t_deflation != t_stagflation
+    # Reflation only flips inflation (growth stays positive) -- trigger must
+    # be about breakevens, not claims.
+    assert "breakeven" in t_reflation and "claims" not in t_reflation
+    # Deflation only flips growth (inflation stays negative) -- trigger must
+    # be about claims, not breakevens.
+    assert "claims" in t_deflation and "breakeven" not in t_deflation
+    # Stagflation flips both axes -- trigger must mention both.
+    assert "breakeven" in t_stagflation and "claims" in t_stagflation
+
+
+def test_invalidation_is_distinct_from_existing_triggers():
+    row = {"init_claims_level": 224000.0, "i_breakeven_10y": 2.35}
+    existing = [thesis_text.build_scenario_trigger("GOLDILOCKS", "REFLATION", row)]
+    invalidation = thesis_text.build_invalidation("GOLDILOCKS", "REFLATION", row, existing_triggers=existing)
+    assert invalidation["condition"] not in existing
+
+
+def test_no_model_implication_is_ever_neutral():
+    for market, by_quadrant in confirmation.MODEL_IMPLICATIONS.items():
+        for quadrant, implication in by_quadrant.items():
+            assert implication != "neutral", "{} x {} is neutral".format(market, quadrant)
+
+
+def test_confirmation_reports_confirms_diverges_neutral_separately():
+    macro = pd.DataFrame({
+        "hy_oas": [3.0] * 25,          # flat -> neutral (below 10bp threshold)
+        "y10": [4.0] * 25,             # flat -> neutral
+        "dollar_broad": [100.0] * 25,  # flat -> neutral
+    }, index=pd.date_range("2026-01-01", periods=25, freq="D"))
+    prices = pd.DataFrame({
+        "SPY": [400.0] * 20 + [420.0] * 5,  # up sharply -> confirms in GOLDILOCKS (implication "up")
+        "DBC": [20.0] * 25,                  # flat -> neutral
+    }, index=pd.date_range("2026-01-01", periods=25, freq="D"))
+    result = confirmation.compute_cross_asset_confirmation("GOLDILOCKS", macro, prices)
+    assert result["confirms"] + result["diverges"] + result["neutral"] == 5
+    assert result["confirms"] >= 1  # equities should confirm
+    assert isinstance(result["confirmationLabel"], str)
+
+
+def test_tape_not_expressing_view_when_mostly_neutral():
+    idx = pd.date_range("2026-01-01", periods=25, freq="D")
+    macro = pd.DataFrame({"hy_oas": [3.0] * 25, "y10": [4.0] * 25, "dollar_broad": [100.0] * 25}, index=idx)
+    prices = pd.DataFrame({"SPY": [400.0] * 25, "DBC": [20.0] * 25}, index=idx)
+    result = confirmation.compute_cross_asset_confirmation("GOLDILOCKS", macro, prices)
+    assert result["neutral"] >= 4
+    assert result["tapeNotExpressingView"] is True
+    assert result["confirmationScore"] is None
+
+
+def test_conviction_cannot_be_high_with_zero_confirms():
+    # The exact bug reported: "Goldilocks, high conviction" directly above
+    # "0 of 5 markets confirm".
+    assert engine.compute_conviction(quadrant_strength=1.5, confirms=0, diverges=1) != "high"
+    assert engine.compute_conviction(quadrant_strength=1.5, confirms=2, diverges=0) == "high"
+    assert engine.compute_conviction(quadrant_strength=0.3, confirms=2, diverges=0) == "medium"
+    assert engine.compute_conviction(quadrant_strength=0.3, confirms=0, diverges=2) == "low"
 
 
 def test_transition_probabilities_suppress_below_min_n():

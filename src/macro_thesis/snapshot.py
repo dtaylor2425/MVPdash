@@ -114,44 +114,81 @@ def build_thesis_snapshot(
     assets_by_quadrant = history_mod.compute_asset_returns_by_quadrant(
         quadrant_history["quadrant"], monthly_prices, ASSET_UNIVERSE
     )
+    # Reconciles "n=13 months classified" (transition sample, conditioned on
+    # quadrant+phase) against "not enough history" on the asset-return table
+    # (conditioned on quadrant alone, needs a REALIZED forward return per
+    # episode) -- these are different, both-correct denominators for
+    # different statistical questions, not a contradiction, but they need
+    # to be reconcilable on the page rather than silently disagreeing.
+    quadrant_month_counts = quadrant_history["quadrant"].value_counts().to_dict()
+    assets_by_quadrant_meta = {
+        q: {
+            "monthsClassified": int(quadrant_month_counts.get(q, 0)),
+            "assetEpisodesRequired": history_mod.MIN_ASSET_EPISODES,
+            "suppressed": len(assets_by_quadrant.get(q, [])) == 0,
+        }
+        for q in history_mod.QUADRANTS
+    }
 
     confirmation = confirmation_mod.compute_cross_asset_confirmation(quadrant, macro, prices_full) if quadrant else {
-        "rows": [], "confirmationScore": None, "modelUnderReview": False,
+        "rows": [], "confirms": 0, "diverges": 0, "neutral": 0,
+        "confirmationScore": None, "confirmationLabel": None,
+        "tapeNotExpressingView": False, "modelUnderReview": False,
     }
 
     raw_row = monthly.iloc[-1].to_dict() if not monthly.empty else {}
     base_probability = None
+    ranked_alternates: List = []
     if transitions_3m and not transitions_3m.get("suppressed") and transitions_3m.get("probabilities"):
         base_probability = transitions_3m["probabilities"].get(quadrant)
-    base_case = thesis_text.build_base_case(
-        quadrant, phase_detail, confirmation, raw_row,
-        probability=base_probability,
-        assets=assets_by_quadrant.get(quadrant) if quadrant else None,
-    )
-
-    alternates = []
-    if transitions_3m and not transitions_3m.get("suppressed") and transitions_3m.get("probabilities"):
-        ranked = sorted(
+        ranked_alternates = sorted(
             ((q, p) for q, p in transitions_3m["probabilities"].items() if q != quadrant),
             key=lambda kv: -kv[1],
         )
-        rank_labels = ["ALTERNATE 1", "ALTERNATE 2"]
-        for (alt_quadrant, prob), rank_label in zip(ranked[:2], rank_labels):
-            alternates.append(
-                thesis_text.build_alternate(
-                    rank_label, alt_quadrant, prob, transitions_3m["sampleSize"],
-                    assets_by_quadrant.get(alt_quadrant), raw_row,
-                )
-            )
 
-    invalidation = thesis_text.build_invalidation(quadrant, raw_row)
+    alternates = []
+    rank_labels = ["MOST LIKELY NEXT", "SECOND MOST LIKELY"]
+    for (alt_quadrant, prob), rank_label in zip(ranked_alternates[:2], rank_labels):
+        alternates.append(
+            thesis_text.build_alternate(
+                rank_label, quadrant, alt_quadrant, prob, transitions_3m["sampleSize"],
+                assets_by_quadrant.get(alt_quadrant), raw_row,
+            )
+        )
+
+    # what_would_change_it reuses alternates[0]'s trigger exactly (not a
+    # second, independently-derived pick) -- "what would change the current
+    # regime" and "the trigger for the most likely next regime" describe the
+    # same real-world threshold crossing by construction, so deriving them
+    # from one call is what guarantees they can't silently disagree.
+    what_would_change_it = alternates[0]["trigger"] if alternates else None
+    primary_target_quadrant = alternates[0]["quadrant"] if alternates else None
+
+    base_case = thesis_text.build_base_case(
+        quadrant, phase_detail, confirmation, raw_row,
+        growth_level=current.get("growth", {}).get("level"),
+        growth_momentum=current.get("growth", {}).get("momentum"),
+        inflation_level=current.get("inflation", {}).get("level"),
+        inflation_momentum=current.get("inflation", {}).get("momentum"),
+        probability=base_probability,
+        assets=assets_by_quadrant.get(quadrant) if quadrant else None,
+        what_would_change_it=what_would_change_it,
+    )
+
+    existing_triggers = [a["trigger"] for a in alternates] + ([what_would_change_it] if what_would_change_it else [])
+    invalidation = thesis_text.build_invalidation(quadrant, primary_target_quadrant, raw_row, existing_triggers)
     invalidation["reviewBy"] = (as_of.date() + timedelta(days=90)).isoformat()
+
+    conviction = engine.compute_conviction(
+        current.get("quadrantStrength"), confirmation.get("confirms", 0), confirmation.get("diverges", 0)
+    )
 
     model_read = {
         "quadrant": quadrant,
         "quadrantStrength": current.get("quadrantStrength"),
         "transitioning": current.get("transitioning"),
         "weeksSinceCrossing": current.get("weeksSinceCrossing"),
+        "conviction": conviction,
         "modelUnderReview": confirmation.get("modelUnderReview", False),
     }
 
@@ -162,13 +199,23 @@ def build_thesis_snapshot(
             "quadrantStrength": current.get("quadrantStrength"),
             "transitioning": current.get("transitioning"),
             "weeksSinceCrossing": current.get("weeksSinceCrossing"),
+            "conviction": conviction,
             "modelUnderReview": confirmation.get("modelUnderReview", False),
         },
         # Spec section 8: model and house view are never merged -- two
         # separate top-level keys, shown side by side, not resolved.
         "modelRead": model_read,
         "houseView": house_view,  # None until an admin publishes one (section 8)
+        # confirmationScore is a ratio over NON-neutral markets only (None
+        # when neutral dominates -- see confirmation.py). confirms/diverges/
+        # neutral are the three raw counts; confirmationLabel is the display
+        # string ("1 diverges, 4 neutral" or "Tape is not expressing a view").
         "confirmationScore": confirmation.get("confirmationScore"),
+        "confirmationLabel": confirmation.get("confirmationLabel"),
+        "confirms": confirmation.get("confirms", 0),
+        "diverges": confirmation.get("diverges", 0),
+        "neutral": confirmation.get("neutral", 0),
+        "tapeNotExpressingView": confirmation.get("tapeNotExpressingView", False),
         "growth": {
             "level": current.get("growth", {}).get("level"),
             "momentum": current.get("growth", {}).get("momentum"),
@@ -203,6 +250,7 @@ def build_thesis_snapshot(
         "transitions": {"3m": transitions_3m, "6m": transitions_6m},
         "assetsByQuadrant": assets_by_quadrant.get(quadrant, []) if quadrant else [],
         "assetsByQuadrantAll": assets_by_quadrant,
+        "assetsByQuadrantMeta": assets_by_quadrant_meta,
         "crossAssetCheck": confirmation.get("rows", []),
         "evidenceTable": _evidence_table(monthly),
         "methodology": {
@@ -211,5 +259,6 @@ def build_thesis_snapshot(
                 "revisions unavailable in real time. Not corrected for real-time vintage."
             ),
             "calibrationDisclosure": engine.CALIBRATION_DISCLOSURE,
+            "calibrationEpisodes": engine.CALIBRATION_EPISODES,
         },
     }

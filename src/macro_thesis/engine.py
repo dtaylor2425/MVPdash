@@ -59,6 +59,27 @@ CALIBRATION_DISCLOSURE = (
     "during transition periods."
 )
 
+# Structured form of the same finding, for a frontend to render as a table
+# instead of parsing CALIBRATION_DISCLOSURE's prose.
+CALIBRATION_EPISODES = [
+    {"episode": "2008 H2", "expectedQuadrant": "DEFLATION", "modelQuadrant": "DEFLATION", "match": True},
+    {"episode": "2021 H1", "expectedQuadrant": "REFLATION", "modelQuadrant": "REFLATION", "match": True},
+    {
+        "episode": "2017", "expectedQuadrant": "GOLDILOCKS", "modelQuadrant": "REFLATION", "match": False,
+        "explanation": (
+            "Market-implied inflation expectations (breakevens) were recovering off the "
+            "2016 oil-crash trough even as realized CPI stayed flat."
+        ),
+    },
+    {
+        "episode": "2022 H1", "expectedQuadrant": "STAGFLATION", "modelQuadrant": "REFLATION", "match": False,
+        "explanation": (
+            "Labor-market data stayed 50-year-strong even as sentiment and market breadth "
+            "were already cracking -- the documented 'hard vs soft data divergence' of that period."
+        ),
+    },
+]
+
 
 def _winsorize(z: pd.Series, cap: float = Z_CAP) -> pd.Series:
     return z.clip(lower=-cap, upper=cap)
@@ -217,6 +238,25 @@ def _axis_level_and_momentum(monthly: pd.DataFrame, input_cols: list, smooth_mon
     momentum = _expanding_zscore(momentum_raw)
 
     return pd.DataFrame({"level": level, "momentum": momentum, "coverage": coverage})
+
+
+def compute_conviction(quadrant_strength: Optional[float], confirms: int, diverges: int) -> str:
+    """Conviction must be a function of BOTH quadrantStrength and tape
+    confirmation -- a strong-momentum read that the tape actively disagrees
+    with is not "high conviction" just because the axes are decisive.
+    high = strong AND tape confirms at least as much as it diverges;
+    medium = one of the two; low = neither. (User-specified formula,
+    2026-09-16, in response to "Goldilocks, high conviction" rendering
+    directly above "0 of 5 markets confirm".)"""
+    if quadrant_strength is None:
+        return "low"
+    strong = quadrant_strength > 1.0
+    confirming_at_least = confirms >= diverges
+    if strong and confirming_at_least:
+        return "high"
+    if strong or confirming_at_least:
+        return "medium"
+    return "low"
 
 
 def assign_quadrant(growth_momentum: float, inflation_momentum: float) -> Optional[str]:
