@@ -105,12 +105,26 @@ def confirmation_sentence(confirmation: Optional[Dict[str, Any]]) -> str:
     return "The tape agrees: {} markets confirm this read.".format(score)
 
 
-def build_base_case(quadrant: Optional[str], phase_info: Optional[Dict], confirmation: Optional[Dict], raw_row: Dict[str, Any]) -> Dict[str, Any]:
+def build_base_case(
+    quadrant: Optional[str],
+    phase_info: Optional[Dict],
+    confirmation: Optional[Dict],
+    raw_row: Dict[str, Any],
+    probability: Optional[float] = None,
+    assets: Optional[List[Dict]] = None,
+) -> Dict[str, Any]:
+    """`probability` is P(still in this quadrant at t+3m) from the same
+    transition matrix `alternates[]` draws from -- the base case IS "stays
+    in the current quadrant", so it has a real number here, not a guess.
+    `expression` mirrors alternates[].expression: top-ranked assets for
+    this (the current) quadrant from the same by-quadrant backtest."""
     quadrant_sentence = QUADRANT_SENTENCES.get(quadrant, "The read is currently unavailable.")
     return {
         "quadrant": quadrant,
         "text": " ".join(filter(None, [quadrant_sentence, phase_sentence(phase_info), confirmation_sentence(confirmation)])),
         "whatWouldChangeIt": top_triggers(raw_row),
+        "probability": probability,
+        "expression": [a["asset"] for a in (assets or [])[:3]],
     }
 
 

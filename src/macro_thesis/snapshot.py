@@ -120,7 +120,14 @@ def build_thesis_snapshot(
     }
 
     raw_row = monthly.iloc[-1].to_dict() if not monthly.empty else {}
-    base_case = thesis_text.build_base_case(quadrant, phase_detail, confirmation, raw_row)
+    base_probability = None
+    if transitions_3m and not transitions_3m.get("suppressed") and transitions_3m.get("probabilities"):
+        base_probability = transitions_3m["probabilities"].get(quadrant)
+    base_case = thesis_text.build_base_case(
+        quadrant, phase_detail, confirmation, raw_row,
+        probability=base_probability,
+        assets=assets_by_quadrant.get(quadrant) if quadrant else None,
+    )
 
     alternates = []
     if transitions_3m and not transitions_3m.get("suppressed") and transitions_3m.get("probabilities"):
