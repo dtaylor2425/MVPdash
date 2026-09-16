@@ -17,6 +17,7 @@ from api.routers.stock_intelligence_snapshots import router as stock_intelligenc
 from api.routers.fx import router as fx_router
 from api.routers.auth import router as auth_router
 from api.routers.admin import router as admin_router
+from api.routers.macro_thesis import router as macro_thesis_router, admin_router as macro_thesis_admin_router
 
 
 try:
@@ -57,6 +58,8 @@ app.include_router(stock_intelligence_snapshots_router)
 app.include_router(fx_router)
 app.include_router(auth_router)
 app.include_router(admin_router)
+app.include_router(macro_thesis_router)
+app.include_router(macro_thesis_admin_router)
 if portfolio:  app.include_router(portfolio.router, prefix="/api")
 if screener:   app.include_router(screener.router,  prefix="/api")
 if playbook:   app.include_router(playbook.router,  prefix="/api")

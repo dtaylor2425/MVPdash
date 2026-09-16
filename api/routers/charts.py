@@ -13,12 +13,24 @@ from api.deps import get_macro, get_prices
 
 router = APIRouter(tags=["Charts"])
 
-RANGES = {"1m": 21, "3m": 63, "6m": 126, "1y": 252, "2y": 504, "5y": 1260}
+RANGES = {"1m": 21, "3m": 63, "6m": 126, "1y": 252, "2y": 504, "5y": 1260, "10y": 2520}
+VALID_RANGES = sorted(RANGES.keys()) + ["max"]  # "max" has no fixed day count -- means no slicing
+
+
+def _validate_range(rng: str) -> str:
+    if rng not in RANGES and rng != "max":
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown range '{}'. Valid values: {}".format(rng, VALID_RANGES),
+        )
+    return rng
 
 
 def _slice(s, rng):
-    days = RANGES.get(rng, 252)
     clean = s.dropna()
+    if rng == "max":
+        return clean
+    days = RANGES[rng]
     return clean.iloc[-days:] if len(clean) > days else clean
 
 
@@ -80,8 +92,9 @@ def _build_inline_map(macro, px):
 @router.get("/charts/{series}")
 def chart_series(
     series: str,
-    range: str = Query("1y", description="1m | 3m | 6m | 1y | 2y | 5y"),
+    range: str = Query("1y", description="1m | 3m | 6m | 1y | 2y | 5y | 10y | max"),
 ):
+    _validate_range(range)
     try:
         macro = get_macro()
         px    = get_prices()
@@ -147,8 +160,9 @@ def chart_series(
 @router.get("/charts/price/{ticker}")
 def chart_price(
     ticker: str,
-    range: str = Query("1y", description="1m | 3m | 6m | 1y | 2y | 5y"),
+    range: str = Query("1y", description="1m | 3m | 6m | 1y | 2y | 5y | 10y | max"),
 ):
+    _validate_range(range)
     try:
         px = get_prices()
     except Exception as e:
