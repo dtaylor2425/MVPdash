@@ -486,6 +486,7 @@ def test_payload_is_json_safe_and_complete():
               "aggression", "openInterest", "quality", "intraday", "largeTrades"):
         assert k in p, k
     assert p["spot"] == 500.0 and p["quality"]["thetaFetchedAt"].startswith("2026-09-21T19:00")
+    assert p["methodologyVersion"] == m.METHODOLOGY_VERSION == "1.0.0"
 
 
 def test_payload_rejects_strikes_not_in_dollars():

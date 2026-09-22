@@ -56,6 +56,7 @@ from api.services.options_flow_calendar import (  # noqa: E402
 )
 from api.services.options_flow_config import load_config, load_universe, ticker_groups  # noqa: E402
 from api.services.options_flow_metrics import (  # noqa: E402
+    METHODOLOGY_VERSION,
     StageTimer,
     _NullTimer,
     build_iv_observation,
@@ -224,7 +225,8 @@ def wrap_iv_warmup_payload(ticker: str, group: str, market_date: date, obs: Dict
     a full-flow day would compute from trade data is explicitly None here -- never a manufactured 0/zero.
     """
     return {
-        "source": SOURCE, "mode": MODE_IV_WARMUP, "ticker": ticker, "group": group,
+        "source": SOURCE, "mode": MODE_IV_WARMUP, "methodologyVersion": METHODOLOGY_VERSION,
+        "ticker": ticker, "group": group,
         "marketDate": market_date.isoformat(), "asOf": obs.get("asOf"), "spot": obs.get("spot"),
         "sentiment": None, "premium": None, "delta": None, "dte": None, "aggression": None, "openInterest": None,
         "iv": {k: v for k, v in obs.items() if k not in ("spot", "asOf", "expirations", "contracts")},

@@ -611,6 +611,7 @@ def test_iv_warmup_mode_never_fetches_trades_or_open_interest():
         for k in ("sentiment", "premium", "delta", "dte", "aggression", "openInterest"):
             assert p[k] is None, k
         assert p["intraday"] == [] and p["largeTrades"] == []
+        assert p["methodologyVersion"] == bf.METHODOLOGY_VERSION == "1.0.0"
         assert v["status"] == "success"
 
 
@@ -833,6 +834,47 @@ def test_pg_migration_is_idempotent_and_existing_rows_become_live():
         except Exception as e:
             assert e.__class__.__name__ == "CheckViolation"
     conn.rollback()
+
+
+def test_pg_methodology_version_is_retroactive_on_old_rows_and_explicit_going_forward():
+    """A row inserted before 008 (no methodology_version in the INSERT at all) must retroactively
+    read as the CURRENT version once 008 is applied -- because nothing about the calculations
+    changed between when that row was written and now, so '1.0.0' is factually correct for it,
+    not merely a placeholder. A row inserted with the current code must carry the same value
+    explicitly (not just via the column default), so a future version bump shows up correctly."""
+    conn = pg_conn(fresh=False)
+    with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS options_flow_symbol_snapshots, options_flow_runs CASCADE")
+        for path in store.DDL_PATHS[:-1]:                      # every migration EXCEPT 008
+            cur.execute(path.read_text(encoding="utf-8"))
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO options_flow_runs (market_date, as_of_timestamp, status, source, mode)
+               VALUES (%s, now(), 'success', 'historical_backfill', 'full_flow') RETURNING id""", (D1,))
+        old_run = cur.fetchone()["id"]
+        cur.execute(
+            """INSERT INTO options_flow_symbol_snapshots
+                   (run_id, ticker, group_name, market_date, as_of_timestamp, payload, source, mode)
+               VALUES (%s, 'SPY', 'INDEX', %s, now(), '{}', 'historical_backfill', 'full_flow')""",
+            (old_run, D1))
+    conn.commit()
+
+    store.ensure_schema(conn)                                   # now applies 008 too
+    with conn.cursor() as cur:
+        cur.execute("SELECT methodology_version FROM options_flow_symbol_snapshots WHERE run_id = %s", (old_run,))
+        assert cur.fetchone()["methodology_version"] == "1.0.0"
+        cur.execute("SELECT methodology_version FROM options_flow_runs WHERE id = %s", (old_run,))
+        assert cur.fetchone()["methodology_version"] == "1.0.0"
+
+    store.publish_backfill(conn, "QQQ", "INDEX", D2, "success", _t(D2), {},
+                           _payload("QQQ", D2, source="historical_backfill"), {})
+    with conn.cursor() as cur:
+        cur.execute("SELECT r.methodology_version AS run_v, s.methodology_version AS snap_v "
+                    "FROM options_flow_symbol_snapshots s JOIN options_flow_runs r ON r.id = s.run_id "
+                    "WHERE s.ticker = 'QQQ'")
+        row = cur.fetchone()
+        assert row["run_v"] == row["snap_v"] == store.METHODOLOGY_VERSION == "1.0.0"
 
 
 def test_pg_iv_warmup_mode_stored_and_upgradeable_to_full_flow():

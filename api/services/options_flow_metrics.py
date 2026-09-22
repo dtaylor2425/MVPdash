@@ -30,6 +30,12 @@ import pandas as pd
 NY_TZ = "America/New_York"
 CONTRACT_MULTIPLIER = 100
 
+# Calculation/schema version for every snapshot this module produces (live, backfill, iv-warmup).
+# Bump this whenever trade classification, the Greek as-of join, IV/skew/term-structure math, DTE
+# buckets, OI matching, or the sentiment/delta formulas change -- consumers (the research dataset
+# export, any backtest) must never silently mix observations computed under different versions.
+METHODOLOGY_VERSION = "1.0.0"
+
 LABEL_BULLISH = "BULLISH"
 LABEL_LEAN_BULLISH = "LEAN BULLISH"
 LABEL_NEUTRAL = "NEUTRAL"
@@ -982,6 +988,7 @@ def build_symbol_payload(
 
     payload = {
         "source": source,
+        "methodologyVersion": METHODOLOGY_VERSION,
         "ticker": ticker,
         "group": group,
         "marketDate": market_date.isoformat(),

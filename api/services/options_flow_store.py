@@ -24,11 +24,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from psycopg.types.json import Jsonb
 
 from api.services.options_flow_calendar import compute_data_status, sessions_before
-from api.services.options_flow_metrics import _clean, iv_history_stats
+from api.services.options_flow_metrics import METHODOLOGY_VERSION, _clean, iv_history_stats
 
 ROOT = Path(__file__).resolve().parents[2]
 DDL_PATHS = [ROOT / "sql" / "005_options_flow.sql", ROOT / "sql" / "006_options_flow_backfill.sql",
-            ROOT / "sql" / "007_options_flow_iv_warmup.sql"]
+            ROOT / "sql" / "007_options_flow_iv_warmup.sql", ROOT / "sql" / "008_options_flow_methodology_version.sql"]
 SOURCE_LIVE = "live"
 SOURCE_BACKFILL = "historical_backfill"
 MODE_FULL_FLOW = "full_flow"
@@ -124,10 +124,10 @@ def create_run(conn, market_date: date, config: Dict[str, Any], source: str = SO
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO options_flow_runs (market_date, as_of_timestamp, status, config, source)
-            VALUES (%s, now(), 'running', %s, %s) RETURNING id
+            INSERT INTO options_flow_runs (market_date, as_of_timestamp, status, config, source, methodology_version)
+            VALUES (%s, now(), 'running', %s, %s, %s) RETURNING id
             """,
-            (market_date, Jsonb(_clean(config)), source),
+            (market_date, Jsonb(_clean(config)), source, METHODOLOGY_VERSION),
         )
         run_id = cur.fetchone()["id"]
     conn.commit()
@@ -149,13 +149,13 @@ def finalize_run(
                 """
                 INSERT INTO options_flow_symbol_snapshots
                     (run_id, ticker, group_name, market_date, as_of_timestamp,
-                     sentiment, sentiment_label, atm_iv, payload, source)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'live')
+                     sentiment, sentiment_label, atm_iv, payload, source, methodology_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'live', %s)
                 """,
                 (run_id, s["ticker"], s["group"], date.fromisoformat(p["marketDate"]), s["as_of"],
                  (p.get("sentiment") or {}).get("value"),
                  (p.get("sentiment") or {}).get("label"),
-                 (p.get("iv") or {}).get("atm"), Jsonb(p)),
+                 (p.get("iv") or {}).get("atm"), Jsonb(p), p.get("methodologyVersion", METHODOLOGY_VERSION)),
             )
         cur.execute(
             """
@@ -294,23 +294,26 @@ def publish_backfill(
             cur.execute(
                 """
                 INSERT INTO options_flow_runs
-                    (market_date, as_of_timestamp, status, config, diagnostics, source, mode, finished_at)
-                VALUES (%s, %s, %s, %s, %s, 'historical_backfill', %s, now()) RETURNING id
+                    (market_date, as_of_timestamp, status, config, diagnostics, source, mode,
+                     methodology_version, finished_at)
+                VALUES (%s, %s, %s, %s, %s, 'historical_backfill', %s, %s, now()) RETURNING id
                 """,
-                (market_date, as_of, status, Jsonb(_clean(config)), Jsonb(_clean(diagnostics)), mode),
+                (market_date, as_of, status, Jsonb(_clean(config)), Jsonb(_clean(diagnostics)), mode,
+                 payload.get("methodologyVersion", METHODOLOGY_VERSION)),
             )
             run_id = cur.fetchone()["id"]
             cur.execute(
                 """
                 INSERT INTO options_flow_symbol_snapshots
                     (run_id, ticker, group_name, market_date, as_of_timestamp,
-                     sentiment, sentiment_label, atm_iv, payload, source, mode)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'historical_backfill', %s)
+                     sentiment, sentiment_label, atm_iv, payload, source, mode, methodology_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'historical_backfill', %s, %s)
                 """,
                 (run_id, ticker, group, market_date, as_of,
                  (payload.get("sentiment") or {}).get("value"),
                  (payload.get("sentiment") or {}).get("label"),
-                 (payload.get("iv") or {}).get("atm"), Jsonb(payload), mode),
+                 (payload.get("iv") or {}).get("atm"), Jsonb(payload), mode,
+                 payload.get("methodologyVersion", METHODOLOGY_VERSION)),
             )
         conn.commit()
         return str(run_id)
@@ -330,10 +333,11 @@ def record_backfill_failure(
         cur.execute(
             """
             INSERT INTO options_flow_runs
-                (market_date, as_of_timestamp, status, config, diagnostics, source, mode, finished_at)
-            VALUES (%s, now(), 'failed', %s, %s, 'historical_backfill', %s, now()) RETURNING id
+                (market_date, as_of_timestamp, status, config, diagnostics, source, mode,
+                 methodology_version, finished_at)
+            VALUES (%s, now(), 'failed', %s, %s, 'historical_backfill', %s, %s, now()) RETURNING id
             """,
-            (market_date, Jsonb(_clean(config)), Jsonb(_clean(diagnostics)), mode),
+            (market_date, Jsonb(_clean(config)), Jsonb(_clean(diagnostics)), mode, METHODOLOGY_VERSION),
         )
         run_id = cur.fetchone()["id"]
     conn.commit()

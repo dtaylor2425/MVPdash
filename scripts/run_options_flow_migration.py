@@ -19,15 +19,15 @@ def _database_url() -> str:
 def main() -> None:
     import psycopg
 
-    files = ["005_options_flow.sql", "006_options_flow_backfill.sql"]
+    from api.services.options_flow_store import DDL_PATHS  # single source of truth, kept in sync with store.ensure_schema
 
     with psycopg.connect(_database_url()) as conn:
         with conn.cursor() as cur:
-            for name in files:
-                cur.execute((ROOT / "sql" / name).read_text(encoding="utf-8"))
+            for path in DDL_PATHS:
+                cur.execute(path.read_text(encoding="utf-8"))
         conn.commit()
 
-    print("Options flow migrations applied ({}).".format(", ".join(files)))
+    print("Options flow migrations applied ({}).".format(", ".join(p.name for p in DDL_PATHS)))
 
 
 if __name__ == "__main__":
