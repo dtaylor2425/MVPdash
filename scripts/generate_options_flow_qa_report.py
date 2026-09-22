@@ -68,7 +68,7 @@ def fetch_published(conn, tickers: List[str], mode: str, start: date, end: date)
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT s.ticker, s.market_date, r.status, s.payload, r.diagnostics
+            SELECT s.ticker, s.market_date, r.status, s.payload, r.diagnostics, s.created_at
             FROM options_flow_symbol_snapshots s
             JOIN options_flow_runs r ON r.id = s.run_id
             WHERE s.source = 'historical_backfill' AND s.mode = %(mode)s
@@ -80,7 +80,7 @@ def fetch_published(conn, tickers: List[str], mode: str, start: date, end: date)
         )
         rows = cur.fetchall()
     return [{"ticker": r["ticker"], "marketDate": r["market_date"], "status": r["status"],
-             "payload": _payload(r), "diagnostics": _diag(r)} for r in rows]
+             "payload": _payload(r), "diagnostics": _diag(r), "createdAt": r["created_at"]} for r in rows]
 
 
 def fetch_failed(conn, tickers: List[str], mode: str, start: date, end: date) -> List[Dict[str, Any]]:
