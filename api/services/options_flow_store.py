@@ -28,7 +28,8 @@ from api.services.options_flow_metrics import METHODOLOGY_VERSION, _clean, iv_hi
 
 ROOT = Path(__file__).resolve().parents[2]
 DDL_PATHS = [ROOT / "sql" / "005_options_flow.sql", ROOT / "sql" / "006_options_flow_backfill.sql",
-            ROOT / "sql" / "007_options_flow_iv_warmup.sql", ROOT / "sql" / "008_options_flow_methodology_version.sql"]
+            ROOT / "sql" / "007_options_flow_iv_warmup.sql", ROOT / "sql" / "008_options_flow_methodology_version.sql",
+            ROOT / "sql" / "009_options_flow_control_plane.sql"]
 SOURCE_LIVE = "live"
 SOURCE_BACKFILL = "historical_backfill"
 MODE_FULL_FLOW = "full_flow"
@@ -574,3 +575,68 @@ def fetch_status(conn, universe: Dict[str, List[str]], cfg: Dict[str, Any], now:
         "lastRunDiagnostics": _diag(last),
         "universe": {g: list(ts) for g, ts in universe.items()},
     }
+
+
+# --------------------------------------------------------------------------
+# backfill progress queries -- shared by scripts/generate_options_flow_qa_report.py,
+# scripts/log_options_flow_phase1_progress.py and jobs/options_flow_backfill.py --status,
+# so "what counts as done/failed for a ticker-day" is defined in exactly one place.
+# --------------------------------------------------------------------------
+
+def _row_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+    p = row["payload"]
+    return json.loads(p) if isinstance(p, str) else p
+
+
+def _row_diagnostics(row: Dict[str, Any]) -> Dict[str, Any]:
+    d = row["diagnostics"]
+    return json.loads(d) if isinstance(d, str) else (d or {})
+
+
+def fetch_mode_published(conn, tickers: Sequence[str], mode: str, start: date, end: date) -> List[Dict[str, Any]]:
+    """Published (success | partial) backfill rows for one mode within [start, end]."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.ticker, s.market_date, r.status, s.payload, r.diagnostics, s.created_at
+            FROM options_flow_symbol_snapshots s
+            JOIN options_flow_runs r ON r.id = s.run_id
+            WHERE s.source = 'historical_backfill' AND s.mode = %(mode)s
+              AND r.status IN ('success', 'partial')
+              AND s.ticker = ANY(%(tickers)s) AND s.market_date BETWEEN %(start)s AND %(end)s
+            ORDER BY s.ticker, s.market_date
+            """,
+            {"mode": mode, "tickers": list(tickers), "start": start, "end": end},
+        )
+        rows = cur.fetchall()
+    return [{"ticker": r["ticker"], "marketDate": r["market_date"], "status": r["status"],
+             "payload": _row_payload(r), "diagnostics": _row_diagnostics(r), "createdAt": r["created_at"]}
+            for r in rows]
+
+
+def fetch_mode_failed(conn, tickers: Sequence[str], mode: str, start: date, end: date) -> List[Dict[str, Any]]:
+    """Latest FAILED run per ticker-day for one mode within [start, end] (config.ticker
+    identifies the ticker-day; a failed row has no snapshot). Only the latest attempt per
+    ticker-day is kept, matching what --resume would actually retry."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (r.config->>'ticker', r.market_date)
+                   r.config->>'ticker' AS ticker, r.market_date, r.diagnostics, r.created_at
+            FROM options_flow_runs r
+            WHERE r.source = 'historical_backfill' AND r.mode = %(mode)s AND r.status = 'failed'
+              AND r.config->>'ticker' = ANY(%(tickers)s) AND r.market_date BETWEEN %(start)s AND %(end)s
+            ORDER BY r.config->>'ticker', r.market_date, r.created_at DESC
+            """,
+            {"mode": mode, "tickers": list(tickers), "start": start, "end": end},
+        )
+        rows = cur.fetchall()
+    return [{"ticker": r["ticker"], "marketDate": r["market_date"], "diagnostics": _row_diagnostics(r),
+             "createdAt": r["created_at"]} for r in rows]
+
+
+def reconcile_failed_days(failed: List[Dict[str, Any]], published: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop a 'failed' entry if that ticker-day has SINCE been published (a later --resume
+    succeeded) -- it is not actually failed anymore."""
+    done = {(r["ticker"], r["marketDate"]) for r in published}
+    return [f for f in failed if (f["ticker"], f["marketDate"]) not in done]

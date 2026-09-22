@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -38,81 +37,25 @@ if str(ROOT) not in sys.path:
 from api.services import options_flow_qa as qa  # noqa: E402
 from api.services.options_flow_calendar import sessions_between  # noqa: E402
 from api.services.options_flow_metrics import METHODOLOGY_VERSION  # noqa: E402
+from api.services.options_flow_phase1_scope import (  # noqa: E402
+    PHASE1_FULL_FLOW_RANGE,
+    PHASE1_TICKERS,
+    PHASE1_WARMUP_RANGE,
+)
+from api.services.options_flow_store import (  # noqa: E402
+    fetch_mode_failed as fetch_failed,
+    fetch_mode_published as fetch_published,
+    reconcile_failed_days as reconcile_failed,
+)
 
-# Phase 1, as actually launched -- keep these in sync with the invocation used
-# (jobs/options_flow_backfill.py --tickers ... --start ... --end ..., run once for
-# full-flow and once for --mode iv-warmup). Overridable via CLI for a different scope.
-DEFAULT_TICKERS = ["SPY", "QQQ", "IWM", "SMH", "TLT", "GLD"]
-DEFAULT_FULL_FLOW = (date(2026, 6, 26), date(2026, 9, 21))
-DEFAULT_WARMUP = (date(2025, 6, 25), date(2026, 6, 25))
+# Phase 1, as actually launched (api/services/options_flow_phase1_scope.py is the single
+# source of truth, shared with jobs/options_flow_backfill.py --status). Overridable via CLI
+# for a different scope.
+DEFAULT_TICKERS = PHASE1_TICKERS
+DEFAULT_FULL_FLOW = PHASE1_FULL_FLOW_RANGE
+DEFAULT_WARMUP = PHASE1_WARMUP_RANGE
 
 REPORTS_DIR = ROOT / "reports"
-
-
-# --------------------------------------------------------------------------
-# Postgres
-# --------------------------------------------------------------------------
-
-def _payload(row) -> Dict[str, Any]:
-    p = row["payload"]
-    return json.loads(p) if isinstance(p, str) else p
-
-
-def _diag(row) -> Dict[str, Any]:
-    d = row["diagnostics"]
-    d = json.loads(d) if isinstance(d, str) else (d or {})
-    return d
-
-
-def fetch_published(conn, tickers: List[str], mode: str, start: date, end: date) -> List[Dict[str, Any]]:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT s.ticker, s.market_date, r.status, s.payload, r.diagnostics, s.created_at
-            FROM options_flow_symbol_snapshots s
-            JOIN options_flow_runs r ON r.id = s.run_id
-            WHERE s.source = 'historical_backfill' AND s.mode = %(mode)s
-              AND r.status IN ('success', 'partial')
-              AND s.ticker = ANY(%(tickers)s) AND s.market_date BETWEEN %(start)s AND %(end)s
-            ORDER BY s.ticker, s.market_date
-            """,
-            {"mode": mode, "tickers": tickers, "start": start, "end": end},
-        )
-        rows = cur.fetchall()
-    return [{"ticker": r["ticker"], "marketDate": r["market_date"], "status": r["status"],
-             "payload": _payload(r), "diagnostics": _diag(r), "createdAt": r["created_at"]} for r in rows]
-
-
-def fetch_failed(conn, tickers: List[str], mode: str, start: date, end: date) -> List[Dict[str, Any]]:
-    """Failed runs are one-per-ticker-day (config.ticker) with no snapshot -- read from
-    options_flow_runs directly. Only the LATEST failed attempt per ticker-day is kept,
-    matching what --resume would actually retry."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT DISTINCT ON (r.config->>'ticker', r.market_date)
-                   r.config->>'ticker' AS ticker, r.market_date, r.diagnostics, r.created_at
-            FROM options_flow_runs r
-            WHERE r.source = 'historical_backfill' AND r.mode = %(mode)s AND r.status = 'failed'
-              AND r.config->>'ticker' = ANY(%(tickers)s) AND r.market_date BETWEEN %(start)s AND %(end)s
-            ORDER BY r.config->>'ticker', r.market_date, r.created_at DESC
-            """,
-            {"mode": mode, "tickers": tickers, "start": start, "end": end},
-        )
-        rows = cur.fetchall()
-    out = []
-    for r in rows:
-        d = _diag(r)
-        # only count as still-failed if no later success/partial superseded it (resume overwrites in place,
-        # so a ticker-day with both a failed AND a later published row is not actually failed anymore)
-        out.append({"ticker": r["ticker"], "marketDate": r["market_date"], "diagnostics": d,
-                    "createdAt": r["created_at"]})
-    return out
-
-
-def reconcile_failed(failed: List[Dict[str, Any]], published: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    done = {(r["ticker"], r["marketDate"]) for r in published}
-    return [f for f in failed if (f["ticker"], f["marketDate"]) not in done]
 
 
 # --------------------------------------------------------------------------

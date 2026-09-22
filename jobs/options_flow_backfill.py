@@ -12,6 +12,7 @@ live job and writes the same tables, tagged source = 'historical_backfill'.
     python jobs/options_flow_backfill.py --ticker SPY --days 5 --dry-run
     python jobs/options_flow_backfill.py --tickers SPY --days 60 --overwrite
     python jobs/options_flow_backfill.py --tickers all --days 60     # full universe, only after phase 1 works
+    python jobs/options_flow_backfill.py --status                    # read-only progress report; see below
 
 Design rules
   * SAME MATH AS LIVE. Each ticker-date goes through jobs.options_flow_refresh.process_ticker
@@ -28,9 +29,21 @@ Design rules
   * LIVE DATA IS UNTOUCHABLE. --overwrite deletes only rows with source = 'historical_backfill'.
     Sessions that are not fully finished (incl. the 16:00-16:15 options tail) are never backfilled.
   * Raw frames are discarded after each expiration; only derived metrics are stored.
+  * SINGLETON PROCESS. A Postgres session-level advisory lock (api.services.options_flow_lock,
+    key "macro_engine_options_flow_backfill") is acquired before anything else touches Postgres
+    or ThetaData -- including --dry-run, which still opens a real ThetaData session. A second
+    concurrent invocation refuses immediately. The lock is held on its own dedicated connection
+    and releases automatically (Postgres-side) the instant that connection closes or drops, for
+    any reason including the process dying -- nothing to clean up on crash.
+  * FATAL VS RECOVERABLE. A normal per-ticker-day failure (bad/missing data for that one day)
+    is recorded and the run continues. An infrastructure-level failure -- invalid/duplicate
+    ThetaData session, authentication/API-key rejection, or a database that has gone unreachable
+    (api.services.options_flow_errors.classify_error) -- stops the ENTIRE process immediately: no
+    more ticker-days, no falling through to another --mode. Re-run with --resume.
 
-Exit codes: 0 every requested ticker-day published (or already present); 1 nothing published /
-fatal; 2 some published, some failed.
+Exit codes: 0 every requested ticker-day published (or already present); 1 nothing published,
+refused (lock already held / scope guard), or a plain unexpected error; 2 some published, some
+failed; 3 run-level fatal infrastructure error (see above); 130 interrupted (Ctrl-C).
 """
 
 from __future__ import annotations
@@ -47,6 +60,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from api.services import options_flow_heartbeat as heartbeat  # noqa: E402
+from api.services import options_flow_lock as lock  # noqa: E402
 from api.services import options_flow_store as store  # noqa: E402
 from api.services.options_flow_calendar import (  # noqa: E402
     last_completed_session,
@@ -55,6 +70,7 @@ from api.services.options_flow_calendar import (  # noqa: E402
     sessions_between,
 )
 from api.services.options_flow_config import load_config, load_universe, ticker_groups  # noqa: E402
+from api.services.options_flow_errors import FatalBackfillError, classify_error  # noqa: E402
 from api.services.options_flow_metrics import (  # noqa: E402
     METHODOLOGY_VERSION,
     StageTimer,
@@ -63,6 +79,18 @@ from api.services.options_flow_metrics import (  # noqa: E402
     fmt_money,
     latest_iv_snapshot,
     normalize_greeks,
+)
+from api.services.options_flow_phase1_scope import (  # noqa: E402
+    PHASE1_FULL_FLOW_RANGE,
+    PHASE1_TICKERS,
+    PHASE1_WARMUP_RANGE,
+)
+from api.services.options_flow_status import (  # noqa: E402
+    format_status,
+    median_runtime_by_ticker,
+    mode_progress,
+    remaining_by_ticker,
+    total_eta_seconds,
 )
 from jobs.options_flow_refresh import ThetaFetcher, log, process_ticker, redact  # noqa: E402
 
@@ -74,7 +102,6 @@ _NULL_TIMER = _NullTimer()
 SOURCE = store.SOURCE_BACKFILL
 MODE_FULL_FLOW = store.MODE_FULL_FLOW
 MODE_IV_WARMUP = store.MODE_IV_WARMUP
-PHASE1_TICKERS = ["SPY", "QQQ", "IWM", "SMH", "TLT", "GLD"]
 DEFAULT_DAYS = 60
 # Guard rails: the full universe over a long window must be an explicit decision.
 MAX_STAGED_TICKERS = len(PHASE1_TICKERS)
@@ -428,6 +455,63 @@ def fmt_bytes(n: Optional[int]) -> str:
     return "{}{}B".format("+" if n >= 0 else "-", a)
 
 
+def print_status(conn_factory: Optional[Callable[[], Any]] = None) -> int:
+    """
+    `--status`: read-only Phase 1 progress report. Never connects to ThetaData (no fetcher of
+    any kind is constructed), never acquires the backfill lock -- it only ever probes it
+    (acquire-then-immediately-release, see options_flow_lock.probe_active), so it can never
+    block or be blocked by the real backfill.
+    """
+    if conn_factory is None:
+        from api.db import get_connection as conn_factory  # noqa: N813
+    try:
+        conn = conn_factory()
+    except Exception as e:  # noqa: BLE001
+        log("Could not reach Postgres: {}".format(redact(str(e))))
+        return 1
+    try:
+        store.ensure_schema(conn)
+        active = lock.probe_active(conn)
+        hb = heartbeat.read_heartbeat(conn)
+
+        tickers = PHASE1_TICKERS
+        full_range, warm_range = PHASE1_FULL_FLOW_RANGE, PHASE1_WARMUP_RANGE
+        full_pub = store.fetch_mode_published(conn, tickers, MODE_FULL_FLOW, *full_range)
+        full_fail = store.reconcile_failed_days(
+            store.fetch_mode_failed(conn, tickers, MODE_FULL_FLOW, *full_range), full_pub)
+        warm_pub = store.fetch_mode_published(conn, tickers, MODE_IV_WARMUP, *warm_range)
+        warm_fail = store.reconcile_failed_days(
+            store.fetch_mode_failed(conn, tickers, MODE_IV_WARMUP, *warm_range), warm_pub)
+
+        n_full = len(sessions_between(*full_range))
+        n_warm = len(sessions_between(*warm_range))
+        full_progress = mode_progress(n_full * len(tickers),
+                                      sum(1 for r in full_pub if r["status"] == "success"),
+                                      sum(1 for r in full_pub if r["status"] == "partial"), len(full_fail))
+        warm_progress = mode_progress(n_warm * len(tickers),
+                                      sum(1 for r in warm_pub if r["status"] == "success"),
+                                      sum(1 for r in warm_pub if r["status"] == "partial"), len(warm_fail))
+
+        full_medians = median_runtime_by_ticker(
+            [{"ticker": r["ticker"], "runtimeSec": r["diagnostics"].get("runtimeSec")}
+             for r in full_pub if r["status"] == "success"])
+        warm_medians = median_runtime_by_ticker(
+            [{"ticker": r["ticker"], "runtimeSec": r["diagnostics"].get("runtimeSec")}
+             for r in warm_pub if r["status"] == "success"])
+        full_eta = total_eta_seconds(full_medians, remaining_by_ticker(tickers, n_full, full_pub))
+        warm_eta = total_eta_seconds(warm_medians, remaining_by_ticker(tickers, n_warm, warm_pub))
+
+        log(format_status(
+            active, hb, METHODOLOGY_VERSION, full_progress, warm_progress,
+            full_eta, full_medians.get("__overall__"), warm_eta, warm_medians.get("__overall__")))
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 # --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
@@ -451,12 +535,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "iv-warmup: Greeks only (ATM/7D/30D/60D IV, term spreads, 25d skew) -- "
                          "no trade_quote, no open interest -- for populating IV percentile history "
                          "cheaply ahead of a research period (see docs/OPTIONS-FLOW-BACKFILL.md)")
+    ap.add_argument("--status", action="store_true",
+                    help="print Phase 1 progress (lock state, heartbeat, counts, ETA) and exit. "
+                         "Read-only: never connects to ThetaData, never acquires the backfill lock.")
     return ap
 
 
 def run(argv: Optional[List[str]] = None, fetcher: Any = None,
-        conn_factory: Optional[Callable[[], Any]] = None, now: Optional[datetime] = None) -> int:
+        conn_factory: Optional[Callable[[], Any]] = None, now: Optional[datetime] = None,
+        lock_conn_factory: Optional[Callable[[], Any]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.status:
+        return print_status(conn_factory)
     mode = MODE_IV_WARMUP if args.mode == "iv-warmup" else MODE_FULL_FLOW
     cfg = load_config()
     if args.max_dte:
@@ -487,19 +577,33 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None,
 
     started = time.time()
     conn = None
+    lock_conn = None
     stats = {"success": 0, "partial": 0, "failed": 0, "skipped": 0}
     partial_days: List[str] = []
     failed_days: List[str] = []
     done = 0
     qa = QaReport(mode)
     db_before = db_after = None
+    run_process_id = heartbeat.new_run_process_id()
+    run_started_at = datetime.now(timezone.utc)
     try:
+        # Singleton-process lock, on its OWN connection, acquired before anything else touches
+        # Postgres or ThetaData -- including for --dry-run, which still opens a real ThetaData
+        # session. A second concurrent invocation must refuse here, not after doing any work.
+        if lock_conn_factory is None:
+            from api.db import get_connection as lock_conn_factory  # noqa: N813
+        lock_conn = lock_conn_factory()
+        store.ensure_schema(lock_conn)
+        if not lock.try_acquire(lock_conn):
+            log("Another options-flow backfill is already active.")
+            log("Refusing to start a second ThetaData session.")
+            return 1
+
         existing: Dict[Tuple[str, date], str] = {}
         if not args.dry_run:
             if conn_factory is None:
                 from api.db import get_connection as conn_factory  # noqa: N813
             conn = conn_factory()
-            store.ensure_schema(conn)
             db_before = db_size_bytes(conn)
             existing = store.backfill_existing(conn, tickers, dates[0], dates[-1])
             if existing and not (args.resume or args.overwrite):
@@ -527,6 +631,11 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None,
             first_written: Optional[date] = None
 
             for d in todo:                                   # chronological: prior IV is always built first
+                if conn is not None:
+                    try:
+                        heartbeat.upsert_heartbeat(conn, run_process_id, mode, t, d, METHODOLOGY_VERSION, run_started_at)
+                    except Exception as e:  # noqa: BLE001 - heartbeat is observability only, never fatal by itself
+                        log("WARNING: heartbeat update failed: {}".format(redact(str(e))))
                 t0 = time.time()
                 tm = StageTimer()
                 payload = meta = None
@@ -543,7 +652,13 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None,
                                                        allow_missing_iv=True, source=SOURCE, verbose=False, timer=tm)
                         status, reasons = assess_payload(payload)
                     error = None
-                except Exception as e:  # noqa: BLE001 - one bad ticker-day never stops the backfill
+                except Exception as e:  # noqa: BLE001 - classified below; only non-fatal ones are per-ticker-day failures
+                    category = classify_error(e)
+                    if category is not None:
+                        # RUN-LEVEL FATAL: this is not about today's data -- stop the whole process
+                        # rather than burn through the rest of the ticker-days hitting the same wall,
+                        # and do NOT fall through to another phase. Caught by the outer handler below.
+                        raise FatalBackfillError(category, e) from e
                     status, reasons, error = "failed", [failure_reason(e)], redact(traceback.format_exc())
                 runtime = time.time() - t0
 
@@ -596,6 +711,15 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None,
         if conn is not None:
             db_after = db_size_bytes(conn)
 
+    except FatalBackfillError as e:
+        # Infrastructure-level failure (invalid/duplicate ThetaData session, auth/API-key
+        # rejection, database unavailable, ...): stop the entire process. Deliberately does
+        # NOT continue to the next ticker-day or fall through to another phase -- that
+        # fallthrough is exactly what turned one bad connection into two concurrent ThetaData
+        # sessions before. --resume picks this ticker-day back up once restarted.
+        log("RUN-LEVEL FATAL [{}]: {}".format(e.category, redact(str(e.original))))
+        log("Stopping the entire process now. Re-run with --resume once the underlying problem is fixed.")
+        return 3
     except KeyboardInterrupt:
         log("\nInterrupted at {}/{} ticker-days. Everything committed so far is safe; re-run with --resume.".format(done, total))
         return 130
@@ -607,6 +731,15 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None,
         if conn is not None:
             try:
                 conn.close()
+            except Exception:
+                pass
+        if lock_conn is not None:
+            try:
+                lock.release(lock_conn)
+            except Exception:
+                pass
+            try:
+                lock_conn.close()
             except Exception:
                 pass
 
