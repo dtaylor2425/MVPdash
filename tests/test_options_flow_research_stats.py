@@ -11,6 +11,7 @@ import pytest
 
 from api.services.options_flow_research_stats import (
     NEUTRAL_SENTIMENT_BAND,
+    benjamini_hochberg,
     classify_agreement,
     describe_returns,
     hac_lag_for_horizon,
@@ -163,6 +164,33 @@ def test_tercile_split():
     edges, labels = tercile_split(list(range(1, 10)))  # 1..9
     assert edges is not None
     assert "low" in labels and "mid" in labels and "high" in labels
+
+
+def test_benjamini_hochberg_known_example():
+    # classic textbook case: m=5, alpha=0.05 -> first 4 (ranked) reject, last does not
+    p = [0.01, 0.02, 0.03, 0.04, 0.5]
+    out = benjamini_hochberg(p, alpha=0.05)
+    assert out["nTested"] == 5
+    assert out["qValues"][0] == pytest.approx(0.05)
+    assert out["qValues"][3] == pytest.approx(0.05)
+    assert out["qValues"][4] == pytest.approx(0.5)
+    assert out["reject"] == [True, True, True, True, False]
+
+
+def test_benjamini_hochberg_preserves_order_and_none():
+    p = [0.5, None, 0.01]  # deliberately unsorted, with a missing test
+    out = benjamini_hochberg(p, alpha=0.05)
+    assert out["nTested"] == 2  # only the 2 non-None p-values are corrected
+    assert out["qValues"][1] is None
+    assert out["reject"][1] is None
+    assert out["qValues"][2] == pytest.approx(0.02)  # 0.01 * 2 / 1
+    assert out["reject"][2] is True
+
+
+def test_benjamini_hochberg_all_none():
+    out = benjamini_hochberg([None, None])
+    assert out["nTested"] == 0
+    assert out["qValues"] == [None, None]
 
 
 def test_sign_bucket():

@@ -182,6 +182,38 @@ def tercile_split(values: Sequence[Optional[float]]) -> Tuple[Optional[Tuple[flo
     return (float(lo), float(hi)), [_lab(v) for v in values]
 
 
+def benjamini_hochberg(p_values: Sequence[Optional[float]], alpha: float = 0.05) -> Dict[str, Any]:
+    """
+    Benjamini-Hochberg FDR correction. `p_values` may contain None (a test that couldn't be run,
+    e.g. insufficient N) -- those are passed through untouched and excluded from the correction
+    entirely (never treated as p=1 or dropped silently from the output).
+
+    Returns, in the SAME order as the input:
+        "qValues": BH-adjusted p-values (None where the input was None)
+        "reject":  True/False/None per hypothesis, at the given `alpha`
+        "nTested": how many non-None p-values were actually corrected
+    """
+    indexed = [(i, p) for i, p in enumerate(p_values) if p is not None]
+    q_values: List[Optional[float]] = [None] * len(p_values)
+    reject: List[Optional[bool]] = [None] * len(p_values)
+    if not indexed:
+        return {"qValues": q_values, "reject": reject, "nTested": 0}
+
+    m = len(indexed)
+    ordered = sorted(indexed, key=lambda ip: ip[1])
+    # standard BH step-up: q_(i) = min_{j>=i} (p_(j) * m / j), enforced monotone non-decreasing
+    raw_q = [p * m / (rank + 1) for rank, (_, p) in enumerate(ordered)]
+    running_min = math.inf
+    monotone_q = [0.0] * m
+    for rank in range(m - 1, -1, -1):
+        running_min = min(running_min, raw_q[rank])
+        monotone_q[rank] = min(running_min, 1.0)
+    for rank, (orig_idx, p) in enumerate(ordered):
+        q_values[orig_idx] = monotone_q[rank]
+        reject[orig_idx] = monotone_q[rank] <= alpha
+    return {"qValues": q_values, "reject": reject, "nTested": m}
+
+
 def sign_bucket(v: Optional[float], neutral_band: float = 0.0) -> Optional[str]:
     if v is None or (isinstance(v, float) and math.isnan(v)):
         return None
