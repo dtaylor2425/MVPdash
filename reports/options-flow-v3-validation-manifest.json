@@ -1,0 +1,74 @@
+{
+  "discovery_commit": "19dc02c",
+  "methodology_version": "1.0.0",
+  "primary_feature": "z_gross_premium_20d",
+  "frozen_before_new_data_pulled_at": "2026-09-23T00:00:00",
+  "definition": {
+    "source_column": "gross_premium",
+    "source_column_origin": "reports/options-flow-research-dataset.parquet (daily aggregate, from api/services/options_flow_metrics.py::flow_totals()['premium']['gross'])",
+    "formula": "z_gross_premium_20d(T, ticker) = (gross_premium(T) - rolling_mean(prior_20)) / rolling_std(prior_20)",
+    "rolling_window_length_sessions": 20,
+    "minimum_prior_observations_required": 10,
+    "current_date_T_excluded_from_baseline": true,
+    "exclusion_mechanism": "pandas .shift(1) applied to the per-ticker series BEFORE the .rolling(20, min_periods=10) call, so the window used for date T's mean/std spans dates strictly before T (never including T)",
+    "standard_deviation_convention": "pandas .rolling().std() default: sample standard deviation, ddof=1",
+    "grouping": "per-ticker (each ETF is z-scored against only its OWN trailing history, never pooled across ETFs)",
+    "null_handling": "z is NaN whenever fewer than 10 prior observations exist (first ~10 sessions per ticker) or when rolling_std is exactly 0 (constant prior window); NaN/inf values are never zero-filled or imputed",
+    "winsorization": "none applied anywhere in the frozen definition",
+    "exact_source_code": [
+      "def _zscore(col: str) -> pd.Series:",
+      "    prior = g[col].shift(1)",
+      "    roll_mean = prior.groupby(df[\"ticker\"]).rolling(Z_WINDOW, min_periods=Z_MIN_PERIODS).mean()",
+      "    roll_std = prior.groupby(df[\"ticker\"]).rolling(Z_WINDOW, min_periods=Z_MIN_PERIODS).std()",
+      "    roll_mean.index = roll_mean.index.droplevel(0)",
+      "    roll_std.index = roll_std.index.droplevel(0)",
+      "    z = (df[col] - roll_mean) / roll_std",
+      "    return z.replace([np.inf, -np.inf], np.nan)",
+      "",
+      "df[\"z_gross_premium_20d\"] = _zscore(\"gross_premium\")"
+    ],
+    "constants_from_commit_19dc02c": {"Z_WINDOW": 20, "Z_MIN_PERIODS": 10},
+    "verbatim_copy_note": "This is a byte-for-byte copy of _zscore()/Z_WINDOW/Z_MIN_PERIODS from scripts/run_options_flow_signal_design_v2.py at commit 19dc02c. v3's implementation must call this exact logic, not a reinterpretation."
+  },
+  "expected_direction_from_v2_recorded_before_new_data": {
+    "sign": "positive",
+    "interpretation": "Higher z_gross_premium_20d (today's gross options premium is elevated relative to that ETF's own trailing 20-session baseline) is expected to be followed by HIGHER forward returns (Q5 mean > Q1 mean at every horizon).",
+    "this_sign_must_not_be_flipped_after_seeing_validation_data": true,
+    "v2_discovery_sample_results": {
+      "sample": "60 sessions x 6 ETFs = 360 rows, 2026-06-26 to 2026-09-21 (the existing Phase 1 full_flow window)",
+      "n_used_after_z_score_warmup": 300,
+      "by_horizon": {
+        "1d": {"n": 300, "q1_mean": -0.000714, "q1_hac_t": -0.394, "q5_mean": 0.003122, "q5_hac_t": 1.726, "q5_minus_q1_mean": 0.003836},
+        "3d": {"n": 300, "q1_mean": -0.006316, "q1_hac_t": -1.856, "q5_mean": 0.007858, "q5_hac_t": 3.024, "q5_minus_q1_mean": 0.014174},
+        "5d": {"n": 300, "q1_mean": -0.008404, "q1_hac_t": -2.134, "q5_mean": 0.012011, "q5_hac_t": 2.819, "q5_minus_q1_mean": 0.020416},
+        "10d": {"n": 300, "q1_mean": -0.014502, "q1_hac_t": -4.281, "q5_mean": 0.022328, "q5_hac_t": 2.599, "q5_minus_q1_mean": 0.036830},
+        "20d": {"n": 300, "q1_mean": -0.013647, "q1_hac_t": -3.118, "q5_mean": 0.023079, "q5_hac_t": 3.292, "q5_minus_q1_mean": 0.036726}
+      },
+      "spearman_quintile_vs_10d_return": {"n": 252, "rho": 0.3318, "p_value": 6.89e-08},
+      "per_etf_signs_5d_10d": {"SPY": [1, 1], "QQQ": [1, 1], "IWM": [1, 1], "SMH": [1, 1], "TLT": [1, 1], "GLD": [1, 1]},
+      "cross_etf_date_clustering_caveat": "quintile-5 bucket: 60 rows across only 34 unique calendar dates (~1.76 rows/date) -- flagged in v2 as a reason 6/6 ETF agreement may partly reflect shared macro-calendar dates, not independent confirmation. This is exactly what v3's date-clustered inference (panel regression clustered by market_date, date-block bootstrap, date-level portfolio test) is designed to resolve."
+    }
+  },
+  "primary_forward_horizons": {"primary": [5, 10, 20], "secondary_for_completeness_only": [1, 3]},
+  "sample_composition_plan": {
+    "discovery_sample_sessions_per_etf": 60,
+    "discovery_sample_range": ["2026-06-26", "2026-09-21"],
+    "validation_sample_sessions_per_etf_target": 192,
+    "feature_warmup_sessions_per_etf_target": 20,
+    "total_new_full_flow_sessions_per_etf_target": 212,
+    "combined_sample_sessions_per_etf_target": 252,
+    "rule": "The PRIMARY validation verdict is based ONLY on the 192 newly backfilled validation sessions (their own trailing-20D z-score baselines are built from the 20 warmup sessions immediately preceding them, never from the discovery-sample sessions). The 60-day discovery sample is reported separately, never merged into the primary significance test. The 252-session combined view is descriptive only, never presented as an out-of-sample result in itself."
+  },
+  "prohibited_during_primary_validation": [
+    "altering the 20-session window length",
+    "trying alternative windows (10D/30D/60D z-scores)",
+    "optimizing percentile/quintile cutoffs",
+    "adding new interaction features",
+    "changing the forward-return horizons",
+    "selecting only favorable ETFs",
+    "removing bad-performing dates",
+    "flipping the recorded expected sign",
+    "training an ML model",
+    "peeking at partial validation results while the backfill is still running"
+  ]
+}
