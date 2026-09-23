@@ -119,9 +119,9 @@ class MemStore:
             undo.append((store, name, getattr(store, name)))
             setattr(store, name, fn)
 
-        def existing(conn, tickers, start, end):
+        def existing(conn, tickers, start, end, mode=None):
             return {k: v["status"] for k, v in self.backfill.items()
-                    if k[0] in tickers and start <= k[1] <= end}
+                    if k[0] in tickers and start <= k[1] <= end and (mode is None or v.get("mode") == mode)}
 
         def publish(conn, ticker, group, d, status, as_of, diag, payload, config, overwrite=False, mode="full_flow"):
             if (ticker, d) in self.backfill and not overwrite:
@@ -149,11 +149,40 @@ class MemStore:
         patch("restat_backfill", lambda conn, t, d, cfg: 0)
 
 
+class _AlwaysGrantLockConn:
+    """Minimal fake for run()'s singleton-lock connection: always grants/releases, never
+    contends with anything -- these tests aren't testing locking, they just need run() to get
+    past the (now-mandatory) lock acquisition step without a real Postgres."""
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            pass
+
+        def fetchone(self):
+            return {"ok": True}
+
+    def cursor(self):
+        return self._Cur()
+
+    def commit(self):
+        pass
+
+    def close(self):
+        pass
+
+
 def _run(args, fetcher, mem, now=NOW):
     undo = []
     mem.install(undo)
     try:
-        return bf.run(args, fetcher=fetcher, conn_factory=lambda: _Conn(), now=now)
+        return bf.run(args, fetcher=fetcher, conn_factory=lambda: _Conn(),
+                      lock_conn_factory=lambda: _AlwaysGrantLockConn(), now=now)
     finally:
         for obj, name, val in reversed(undo):
             setattr(obj, name, val)
@@ -516,9 +545,13 @@ def test_backfilled_days_are_chronological_and_history_builds_up():
 
 
 def test_dry_run_writes_nothing_and_needs_no_database():
+    # dry-run still opens a real ThetaData session, so it DOES need the lock connection (guards
+    # against two concurrent dry-runs the same way any other invocation is guarded); it must
+    # never open the DATA connection, since nothing is written.
     def boom():
-        raise AssertionError("dry run opened a DB connection")
-    assert bf.run(["--tickers", "SPY", "--days", "3", "--dry-run"], fetcher=Counting(), conn_factory=boom, now=NOW) == 0
+        raise AssertionError("dry run opened the data DB connection")
+    assert bf.run(["--tickers", "SPY", "--days", "3", "--dry-run"], fetcher=Counting(), conn_factory=boom,
+                  lock_conn_factory=lambda: _AlwaysGrantLockConn(), now=NOW) == 0
 
 
 # --------------------------------------------------------------------------
@@ -629,7 +662,13 @@ def test_iv_warmup_then_full_flow_upgrade_needs_overwrite():
     mem2 = MemStore()
     assert _run(single + ["--mode", "iv-warmup"], Counting(), mem2) == 0
     assert mem2.backfill[("SPY", d)]["mode"] == "iv_warmup"
-    assert _run(single, Counting(), mem2) == 1                       # refused without overwrite/resume
+    # backfill_existing() is mode-filtered (see test_pg_backfill_existing_does_not_leak_across_modes):
+    # asking for full_flow correctly sees nothing published for full_flow yet, so this is NOT refused
+    # upfront -- it proceeds, computes the real full_flow result, then the physical (ticker, date)
+    # slot's still occupied by the iv_warmup row, so the write is safely skipped (DuplicateBackfillError),
+    # exit 0, and the iv_warmup data is left untouched, exactly like any other "already published" skip.
+    code = _run(single, Counting(), mem2)
+    assert code == 0 and mem2.backfill[("SPY", d)]["mode"] == "iv_warmup"   # untouched without --overwrite
     assert _run(single + ["--overwrite"], Counting(), mem2) == 0
     assert mem2.backfill[("SPY", d)]["mode"] == "full_flow"
     assert mem2.backfill[("SPY", d)]["payload"]["sentiment"] is not None
@@ -902,12 +941,29 @@ def test_pg_iv_warmup_mode_stored_and_upgradeable_to_full_flow():
         pass
 
 
+def test_pg_backfill_existing_does_not_leak_across_modes():
+    """Regression: an iv_warmup row for a date must never make backfill_existing()/--resume
+    treat that date as 'already done' for full_flow (or vice versa) -- found in Phase 1 when
+    an ad-hoc iv-warmup smoke-test date fell inside the full-flow window and was silently,
+    permanently skipped by every full-flow --resume afterward, with no error and no record."""
+    conn = pg_conn()
+    store.publish_backfill(conn, "SPY", "INDEX", D1, "success", _t(D1), {},
+                           _payload("SPY", D1, None, 0.15, "historical_backfill"), {}, mode="iv_warmup")
+    only_iv = store.backfill_existing(conn, ["SPY"], D1, D1, mode="iv_warmup")
+    only_full = store.backfill_existing(conn, ["SPY"], D1, D1, mode="full_flow")
+    unfiltered = store.backfill_existing(conn, ["SPY"], D1, D1)   # mode=None: legacy cross-mode view
+    assert only_iv == {("SPY", D1): "success"}
+    assert only_full == {}                                        # <-- the bug: this used to equal only_iv
+    assert unfiltered == {("SPY", D1): "success"}
+
+
 def test_pg_full_iv_warmup_backfill_run_writes_mode_column():
     conn0 = pg_conn()
     conn0.close()
 
     def go(args):
-        return bf.run(args, fetcher=Counting(), conn_factory=lambda: pg_conn(fresh=False), now=NOW)
+        return bf.run(args, fetcher=Counting(), conn_factory=lambda: pg_conn(fresh=False),
+                      lock_conn_factory=lambda: pg_conn(fresh=False), now=NOW)
 
     assert go(BASE + ["--mode", "iv-warmup"]) == 0
     conn = pg_conn(fresh=False)
@@ -1072,7 +1128,8 @@ def test_pg_full_backfill_run_resume_overwrite_and_live_untouched():
     conn0.close()
 
     def go(args, fetcher):
-        return bf.run(args, fetcher=fetcher, conn_factory=lambda: pg_conn(fresh=False), now=NOW)
+        return bf.run(args, fetcher=fetcher, conn_factory=lambda: pg_conn(fresh=False),
+                      lock_conn_factory=lambda: pg_conn(fresh=False), now=NOW)
 
     f1 = Counting()
     assert go(BASE, f1) == 0 and len(f1.calls) == len(DAYS)

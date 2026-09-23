@@ -244,8 +244,22 @@ class DuplicateBackfillError(Exception):
     """A backfill snapshot for this (ticker, market_date) already exists and overwrite was not requested."""
 
 
-def backfill_existing(conn, tickers: Sequence[str], start: date, end: date) -> Dict[Tuple[str, date], str]:
-    """{(ticker, market_date): 'success' | 'partial'} for published backfill snapshots in range."""
+def backfill_existing(
+    conn, tickers: Sequence[str], start: date, end: date, mode: Optional[str] = None,
+) -> Dict[Tuple[str, date], str]:
+    """
+    {(ticker, market_date): 'success' | 'partial'} for published backfill snapshots in range.
+
+    `mode` MUST be passed by any caller deciding what to skip/resume: a full_flow row and an
+    iv_warmup row for the same (ticker, market_date) are different computations (full_flow has
+    no equivalent iv_warmup row for that date, and vice versa) even though the partial unique
+    index allows only one PHYSICAL row per (ticker, market_date) regardless of mode. Without
+    filtering by mode, a date that was ever published in ONE mode (e.g. an ad-hoc iv-warmup
+    smoke test on a date that later falls inside the full-flow window) is silently treated as
+    "already done" for the OTHER mode forever -- no error, no failure record, just a permanent
+    gap. `mode=None` (legacy, no filtering) is kept only for callers that genuinely want the
+    cross-mode view (there are none in this codebase); every real caller passes it explicitly.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -254,9 +268,10 @@ def backfill_existing(conn, tickers: Sequence[str], start: date, end: date) -> D
             JOIN options_flow_runs r ON r.id = s.run_id
             WHERE s.source = 'historical_backfill' AND r.source = 'historical_backfill'
               AND r.status IN ('success', 'partial')
-              AND s.ticker = ANY(%s) AND s.market_date BETWEEN %s AND %s
+              AND s.ticker = ANY(%(tickers)s) AND s.market_date BETWEEN %(start)s AND %(end)s
+              AND (%(mode)s::text IS NULL OR s.mode = %(mode)s)
             """,
-            (list(tickers), start, end),
+            {"tickers": list(tickers), "start": start, "end": end, "mode": mode},
         )
         return {(r["ticker"], r["market_date"]): r["status"] for r in cur.fetchall()}
 

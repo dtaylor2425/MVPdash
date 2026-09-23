@@ -605,7 +605,7 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None,
                 from api.db import get_connection as conn_factory  # noqa: N813
             conn = conn_factory()
             db_before = db_size_bytes(conn)
-            existing = store.backfill_existing(conn, tickers, dates[0], dates[-1])
+            existing = store.backfill_existing(conn, tickers, dates[0], dates[-1], mode=mode)
             if existing and not (args.resume or args.overwrite):
                 log("ERROR: {} ticker-days in range already have a backfill snapshot. "
                     "Use --resume to skip them or --overwrite to rebuild them.".format(len(existing)))

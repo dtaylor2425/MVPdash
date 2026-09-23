@@ -170,7 +170,8 @@ def _patch_store(monkey, backfill=None, failures=None, heartbeats=None):
     patch(bf.store, "ensure_schema", lambda conn: None)
     # backfill_existing()'s real return type is {(ticker, date): status_string}, distinct from
     # our local `backfill` dict's {(ticker, date): {"status":..., "payload":...}} shape.
-    patch(bf.store, "backfill_existing", lambda conn, tickers, start, end: {k: v["status"] for k, v in backfill.items()})
+    patch(bf.store, "backfill_existing",
+         lambda conn, tickers, start, end, mode=None: {k: v["status"] for k, v in backfill.items()})
     patch(bf.store, "load_atm_series", lambda conn, t: {})
     patch(bf.store, "build_iv_history", lambda series, d: {"priorAtmIv": [], "sessionsBack": []})
     patch(bf.store, "restat_backfill", lambda conn, t, d, cfg: 0)
