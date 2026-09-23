@@ -158,28 +158,49 @@ def extract_row(ticker: str, market_date: Any, payload: Dict[str, Any]) -> Dict[
 
 
 def main() -> int:
+    import argparse
+
     import pandas as pd
     import psycopg
     from psycopg.rows import dict_row
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--start", default=None, help="YYYY-MM-DD, restrict to market_date >= this (default: no filter, same as before this flag existed)")
+    ap.add_argument("--end", default=None, help="YYYY-MM-DD, restrict to market_date <= this")
+    ap.add_argument("--out", default=str(OUT_PATH), help="output parquet path (default: %(default)s -- "
+                   "the committed v2 file; pass a different path for a scoped extraction so v2's "
+                   "file is never overwritten)")
+    args = ap.parse_args()
 
     database_url = _get_database_url()
     conn = psycopg.connect(database_url, row_factory=dict_row)
     try:
         cur = conn.cursor()
+        clauses = ["mode = 'full_flow'"]
+        params: dict = {}
+        if args.start:
+            clauses.append("market_date >= %(start)s")
+            params["start"] = args.start
+        if args.end:
+            clauses.append("market_date <= %(end)s")
+            params["end"] = args.end
         cur.execute(
-            "SELECT ticker, market_date, payload FROM options_flow_symbol_snapshots "
-            "WHERE mode = 'full_flow' ORDER BY ticker, market_date"
+            f"SELECT ticker, market_date, payload FROM options_flow_symbol_snapshots "
+            f"WHERE {' AND '.join(clauses)} ORDER BY ticker, market_date",
+            params,
         )
         rows = cur.fetchall()
     finally:
         conn.close()
 
-    print(f"Fetched {len(rows)} full_flow payload rows from Postgres (read-only).")
+    print(f"Fetched {len(rows)} full_flow payload rows from Postgres (read-only)."
+         + (f" [start>={args.start}]" if args.start else "") + (f" [end<={args.end}]" if args.end else ""))
     extracted = [extract_row(r["ticker"], r["market_date"], r["payload"]) for r in rows]
     df = pd.DataFrame(extracted)
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(OUT_PATH, index=False)
-    print(f"Wrote {OUT_PATH} ({len(df)} rows, {df['ticker'].nunique()} tickers, "
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(out_path, index=False)
+    print(f"Wrote {out_path} ({len(df)} rows, {df['ticker'].nunique()} tickers, "
          f"{df['date'].min()} -> {df['date'].max()})")
     print(f"Columns: {list(df.columns)}")
     return 0
