@@ -27,6 +27,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+from src.monthly_data import monthly_year_over_year
 
 Z_CAP = 2.5
 MIN_EXPANDING_PERIODS = 24  # months; z-scores before this are wide/unreliable
@@ -124,9 +125,9 @@ def build_monthly_raw(
         return s[s.index <= as_of]
 
     cpi = clipped(macro, "cpi")
-    cpi_yoy = (cpi.pct_change(12) * 100).dropna()
+    cpi_yoy = monthly_year_over_year(cpi)
     fed_funds = clipped(macro, "fed_funds")
-    real_fed_funds = (fed_funds - cpi_yoy.reindex(fed_funds.index).ffill()).dropna()
+    real_fed_funds = (fed_funds - cpi_yoy.reindex(fed_funds.index, method="ffill")).dropna()
 
     rsp = clipped(prices, "RSP")
     spy = clipped(prices, "SPY")

@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 
 from api.deps import get_macro, get_prices
+from src.monthly_data import monthly_year_over_year
 
 router = APIRouter(tags=["Charts"])
 
@@ -81,7 +82,7 @@ def _build_inline_map(macro, px):
         # Simple derived (kept inline for speed)
         "curve_2s10s":  lambda: (y10 - y2).dropna(),
         "curve_3m10":   lambda: (y10 - y3m).dropna(),
-        "cpi_yoy":      lambda: (_col("cpi").pct_change(12) * 100).dropna() if "cpi" in macro.columns else pd.Series(dtype=float),
+        "cpi_yoy":      lambda: monthly_year_over_year(macro["cpi"]).dropna() if "cpi" in macro.columns else pd.Series(dtype=float),
 
         # Proxy passthroughs
         "spy":          lambda: _px("SPY"),

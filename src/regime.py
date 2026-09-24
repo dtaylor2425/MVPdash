@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
+from src.monthly_data import monthly_year_over_year
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -330,9 +331,8 @@ def _compute_core(
     gl_score = 0.0; cpi_ok = False
 
     if "cpi" in macro.columns:
-        cpi_s = macro["cpi"].dropna()
-        if len(cpi_s) >= 13:
-            yoy = cpi_s.pct_change(12).dropna() * 100.0
+        yoy = monthly_year_over_year(macro["cpi"]).dropna()
+        if not yoy.empty:
             p2_level = _level_last(yoy); p2_z = _zscore_last(yoy, z_window)
             p2_roc_z = _roc_zscore(yoy, lookback_trend, z_window)
             p2_trend = _trend_dir(yoy, lookback_trend)

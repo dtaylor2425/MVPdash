@@ -14,6 +14,7 @@ import streamlit as st
 
 from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES, YF_PROXIES
 from src.data_sources import fetch_prices, get_fred_cached
+from src.monthly_data import monthly_year_over_year
 from src.ranges import RANGES, slice_series, slice_df
 from src.ui import inject_css, sidebar_nav, safe_switch_page
 
@@ -53,7 +54,7 @@ ff         = _col("fed_funds")
 cpi_raw    = _col("cpi")
 hy_oas     = _col("hy_oas")
 
-cpi_yoy   = (cpi_raw.pct_change(12) * 100).dropna() if len(cpi_raw) >= 13 else None
+cpi_yoy   = monthly_year_over_year(cpi_raw).dropna() if not cpi_raw.empty else None
 breakeven = (y10 - real10).dropna() if len(y10) > 10 and len(real10) > 10 \
             else pd.Series(dtype=float)
 

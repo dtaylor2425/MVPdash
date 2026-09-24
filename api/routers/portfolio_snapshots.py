@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from copy import deepcopy
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.auth_deps import optional_account
 from api.db import get_connection
+from src.portfolio_ledger import first_entries, number
 
 router = APIRouter(prefix="/api/portfolio-snapshots", tags=["portfolio-snapshots"])
 VALID_STRATEGIES = {"stock_alpha", "smid_growth", "etf_macro"}
@@ -22,6 +24,8 @@ def _truncate_for_anon(payload: Dict[str, Any]) -> Dict[str, Any]:
         performance["rebalance_log"] = []
         out["performance"] = performance
     out["official_rebalance_log"] = []
+    out.pop("official_rebalance", None)
+    out["trade_queue"] = []
     out["truncated"] = True
     return out
 
@@ -36,23 +40,25 @@ def _validate_strategy(strategy: str) -> str:
     return strategy
 
 
-def _official_rebalance_log(strategy: str, limit: int = 20) -> List[Dict[str, Any]]:
+def _official_rebalance_log(strategy: str, limit: int = 20, through=None) -> List[Dict[str, Any]]:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT pr.id AS run_id, pr.strategy, pr.run_date, r.rebalance_date,
                        r.headline, r.buys, r.sells, r.adds, r.trims, r.turnover,
-                       r.old_holdings, r.new_holdings
+                       r.old_holdings, r.new_holdings,
+                       pr.payload -> 'official_rebalance' -> 'exits' AS exits
                 FROM portfolio_rebalances r
                 JOIN portfolio_runs pr ON pr.id = r.run_id
                 WHERE pr.strategy = %s
                   AND pr.status = 'published'
                   AND pr.is_published = TRUE
+                  AND (%s::timestamptz IS NULL OR pr.published_at <= %s::timestamptz)
                 ORDER BY r.rebalance_date DESC, pr.as_of_timestamp DESC
                 LIMIT %s
                 """,
-                (strategy, limit),
+                (strategy, through, through, limit),
             )
             rows = cur.fetchall()
 
@@ -70,13 +76,14 @@ def _official_rebalance_log(strategy: str, limit: int = 20) -> List[Dict[str, An
             "turnover": float(row["turnover"]) if row.get("turnover") is not None else None,
             "old_holdings": row["old_holdings"] or [],
             "new_holdings": row["new_holdings"] or [],
+            "exits": row.get("exits") or [],
         }
         for row in rows
     ]
 
 
 def _row_to_payload(row: Dict[str, Any], official_log: List[Dict[str, Any]]) -> Dict[str, Any]:
-    payload = row.get("payload") or {}
+    payload = deepcopy(row.get("payload") or {})
     if not isinstance(payload, dict):
         payload = {"payload": payload}
 
@@ -92,6 +99,41 @@ def _row_to_payload(row: Dict[str, Any], official_log: List[Dict[str, Any]]) -> 
         "is_published": row["is_published"],
     }
     payload["official_rebalance_log"] = official_log
+    # Internal quantities and full trade history are not a public API surface.
+    payload.pop("ledger", None)
+    return payload
+
+
+def _entry_references(row, payload):
+    """Read-through enrichment only; never rewrite a historical database row."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, run_date, published_at, payload -> 'holdings' AS holdings
+                           FROM portfolio_runs WHERE strategy = %s AND status = 'published'
+                           AND published_at <= %s ORDER BY run_date, published_at""",
+                        (row["strategy"], row["published_at"]))
+            entries = first_entries(cur.fetchall())
+    for holding in payload.get("holdings") or []:
+        if "entry_price_status" not in holding:
+            holding.update(entries.get(holding["ticker"], {}))
+        if holding.get("current_price") is None:
+            holding["current_price"] = number(holding.get("close"))
+        entry = number(holding.get("entry_price"), 0)
+        current = number(holding.get("current_price"), 0)
+        holding["unrealized_return_pct"] = (current / entry - 1) * 100 if entry > 0 and current > 0 else None
+        holding["cost_basis_complete"] = entry > 0
+    if not payload.get("valuation_as_of"):
+        series = (payload.get("performance") or {}).get("series") or []
+        payload["valuation_as_of"] = series[-1]["date"] if series else str(row["run_date"])
+    if not (row.get("payload") or {}).get("ledger"):
+        invested = sum(number(h.get("target_weight"), 0) for h in payload.get("holdings") or [])
+        payload["stock_exposure"] = invested
+        payload["cash_weight"] = max(0, 1-invested)
+        payload["valuation_basis"] = "published_target_weights"
+        payload["trade_queue"] = []  # Legacy suggestions were not recorded executions.
+        payload["exposure_regime"] = "Published allocation; prospective accounting begins with the ledger migration"
+    else:
+        payload["valuation_basis"] = "marked_positions"
     return payload
 
 
@@ -123,7 +165,7 @@ def get_latest_portfolio_snapshot(
             status_code=404,
             detail=f"No published snapshot for {strategy}. Run jobs/nightly_portfolio_refresh.py first.",
         )
-    payload = _row_to_payload(row, _official_rebalance_log(strategy))
+    payload = _entry_references(row, _row_to_payload(row, _official_rebalance_log(strategy, through=row["published_at"])))
     if user is None:
         return _truncate_for_anon(payload)
     payload["truncated"] = False
@@ -141,7 +183,7 @@ def get_portfolio_snapshot_history(
             cur.execute(
                 """
                 SELECT id, strategy, run_date, as_of_timestamp, status, is_published,
-                       created_at, published_at, diagnostics, payload -> 'holdings' AS holdings
+                       created_at, published_at, payload -> 'holdings' AS holdings
                 FROM portfolio_runs
                 WHERE strategy = %s
                   AND status = 'published'
@@ -163,7 +205,7 @@ def get_portfolio_snapshot_history(
                 "as_of_timestamp": row["as_of_timestamp"].isoformat() if row.get("as_of_timestamp") else None,
                 "published_at": row["published_at"].isoformat() if row.get("published_at") else None,
                 "holding_count": len(row.get("holdings") or []),
-                "diagnostics": row.get("diagnostics") or {},
+                "diagnostics": {},  # Internal diagnostics contain gated trade history.
             }
             for row in rows
         ],
@@ -182,7 +224,7 @@ def get_portfolio_snapshot_run(
                 SELECT id, strategy, run_date, as_of_timestamp, status, is_published,
                        config, diagnostics, payload, created_at, published_at
                 FROM portfolio_runs
-                WHERE id = %s
+                WHERE id = %s AND status = 'published'
                 LIMIT 1
                 """,
                 (run_id,),
@@ -191,7 +233,7 @@ def get_portfolio_snapshot_run(
 
     if not row:
         raise HTTPException(status_code=404, detail="Portfolio snapshot run not found.")
-    payload = _row_to_payload(row, _official_rebalance_log(row["strategy"]))
+    payload = _entry_references(row, _row_to_payload(row, _official_rebalance_log(row["strategy"], through=row["published_at"])))
     if user is None:
         return _truncate_for_anon(payload)
     payload["truncated"] = False

@@ -13,6 +13,7 @@ import streamlit as st
 
 from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES, YF_PROXIES
 from src.data_sources import fetch_prices, get_fred_cached
+from src.monthly_data import monthly_year_over_year
 from src.regime import compute_regime_v3, compute_regime_timeseries
 from src.ui import inject_css, sidebar_nav, safe_switch_page, regime_color, regime_bg
 
@@ -142,8 +143,8 @@ curve_210 = (y10 - y2).dropna()   if len(y10)>1 and len(y2)>1   else pd.Series(d
 breakeven = (y10 - real10).dropna() if len(y10)>1 and len(real10)>1 else pd.Series(dtype=float)
 
 cpi_yoy = None
-if "cpi" in macro.columns and len(macro["cpi"].dropna()) >= 13:
-    cpi_yoy = (macro["cpi"].dropna().pct_change(12)*100).dropna()
+if "cpi" in macro.columns:
+    cpi_yoy = monthly_year_over_year(macro["cpi"]).dropna()
 
 c210_now   = _last(curve_210);  c210_1m  = _delta(curve_210, 30)
 real_now   = _last(real10);     real_1m  = _delta(real10, 30)

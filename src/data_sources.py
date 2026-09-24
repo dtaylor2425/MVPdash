@@ -3,6 +3,7 @@ import time
 import pandas as pd
 import yfinance as yf
 from fredapi import Fred
+from src.monthly_data import CPI_CACHE_SUFFIX, align_macro_observations
 
 
 def fetch_prices(tickers: list[str], period: str = "5y") -> pd.DataFrame:
@@ -174,6 +175,11 @@ def get_fred_cached(
     ffill(), so macro.index.max() correctly reflects the latest date FRED
     actually published data for any series.
     """
+    # Old caches may already contain forward-filled CPI. Never interpret those
+    # carried values as native monthly observations; leave the old file intact.
+    if "cpi" in series_map:
+        cache_name += CPI_CACHE_SUFFIX
+
     # ── Check disk cache age ──────────────────────────────────────────────────
     cached     = None
     cache_file = _parquet_path(cache_dir, cache_name)
@@ -213,5 +219,5 @@ def get_fred_cached(
     # last FRED publication date, not the last forward-filled synthetic row.
     write_parquet(df.sort_index(), cache_dir, cache_name)
 
-    # ffill for downstream consumers that need contiguous daily series
-    return df.sort_index().ffill()
+    # Carry daily inputs forward, retaining native CPI gaps for monthly math.
+    return align_macro_observations(df)

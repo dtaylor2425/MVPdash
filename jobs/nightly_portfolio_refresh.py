@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from api.db import get_connection
+from src.portfolio_ledger import build_ledger
+from src.portfolio_market import load_market
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -122,6 +124,8 @@ def _performance_series_from_payload(payload: Dict[str, Any]) -> List[Dict[str, 
 
 def _position_weight(row: Dict[str, Any]) -> float:
     try:
+        if row.get("current_weight") is not None:
+            return float(row["current_weight"])
         return float(row.get("target_weight") or row.get("weight") or row.get("allocation") or 0.0)
     except (TypeError, ValueError):
         return 0.0
@@ -147,6 +151,29 @@ def _load_latest_published(strategy: str) -> Optional[Dict[str, Any]]:
                 (strategy,),
             )
             return cur.fetchone()
+
+
+def _load_published_history(strategy: str):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, run_date, published_at, payload -> 'holdings' AS holdings FROM portfolio_runs
+                           WHERE strategy = %s AND status = 'published'
+                           ORDER BY run_date, published_at""", (strategy,))
+            return cur.fetchall()
+
+
+def _assert_publication_guards():
+    required = {"portfolio_run_immutable", "portfolio_positions_immutable", "portfolio_performance_immutable",
+                "portfolio_rebalances_immutable", "portfolio_publication_append_only"}
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT tgname FROM pg_trigger WHERE NOT tgisinternal
+                           AND tgenabled IN ('O', 'A') AND tgrelid IN
+                           ('portfolio_runs'::regclass, 'portfolio_positions'::regclass,
+                            'portfolio_performance'::regclass, 'portfolio_rebalances'::regclass)""")
+            active = {r["tgname"] for r in cur.fetchall()}
+    if required - active:
+        raise ValueError("Apply sql/002_portfolio_publication_immutability.sql before publishing")
 
 
 def _official_rebalance_diff(
@@ -175,6 +202,15 @@ def _official_rebalance_diff(
         for t in sorted(old_tickers | new_tickers)
     )
 
+    if new_payload.get("ledger"):
+        # Market drift is not a trade. Only executed quantity changes belong here.
+        trades = new_payload.get("trade_queue") or []
+        buys = sorted({t["ticker"] for t in trades if t["action"] == "Buy" and t["ticker"] not in old_tickers})
+        sells = sorted({t["ticker"] for t in trades if t["action"] == "Sell" and t["ticker"] not in new_tickers})
+        adds = sorted({t["ticker"] for t in trades if t["action"] == "Buy" and t["ticker"] in old_tickers})
+        trims = sorted({t["ticker"] for t in trades if t["action"] == "Sell" and t["ticker"] in new_tickers})
+        turnover = 0.5 * sum(t["weight_traded"] for t in trades)
+
     parts: List[str] = []
     if buys:
         parts.append("Bought " + ", ".join(buys[:4]))
@@ -185,7 +221,7 @@ def _official_rebalance_diff(
     if not parts and trims:
         parts.append("Trimmed " + ", ".join(trims[:4]))
     if not parts:
-        parts.append("No major changes")
+        parts.append("No executed changes" if new_payload.get("ledger") else "No major changes")
 
     return {
         "rebalance_date": rebalance_date.isoformat(),
@@ -195,6 +231,7 @@ def _official_rebalance_diff(
         "adds": adds,
         "trims": trims,
         "turnover": turnover,
+        "exits": [t for t in new_payload.get("trade_queue", []) if t.get("action") == "Sell" and "exit_type" in t],
         "old_holdings": sorted(
             [{"ticker": t, "weight": w} for t, w in old_weights.items()],
             key=lambda x: x["weight"],
@@ -233,6 +270,16 @@ def _validate_payload(
     if cash > float(cfg["max_cash_weight"]):
         errors.append(f"Cash weight too high: {cash:.2%}")
 
+    if payload.get("ledger"):
+        target = float(payload.get("target_stock_exposure", 0))
+        if not .65 <= target <= .95:
+            errors.append("Macro target must stay between 65% and 95% long")
+        if abs(sum(_position_weight(p) for p in positions) + cash - 1) > 1e-7:
+            errors.append("Position weights and cash do not reconcile")
+        prior_series = _performance_series_from_payload(previous_payload or {})
+        if series[:len(prior_series)] != prior_series:
+            errors.append("Published performance history changed")
+
     if previous_payload:
         turnover = float(official_rebalance.get("turnover") or 0.0)
         ticker_change_ratio = float(official_rebalance.get("ticker_change_ratio") or 0.0)
@@ -254,6 +301,7 @@ def _build_strategy_payload(strategy: str) -> Dict[str, Any]:
             max_tickers=int(cfg["max_tickers"]),
             target_holdings=int(cfg["target_holdings"]),
             min_score=float(cfg["min_score"]),
+            include_history=False,
         )
     if strategy == "smid_growth":
         from api.routers.smid_growth_portfolio import _build_payload
@@ -262,6 +310,7 @@ def _build_strategy_payload(strategy: str) -> Dict[str, Any]:
             max_tickers=int(cfg["max_tickers"]),
             tickers=None,
             min_score=float(cfg["min_score"]),
+            include_history=False,
         )
     raise ValueError(f"Unsupported strategy: {strategy}")
 
@@ -403,14 +452,7 @@ def _mark_failed(run_id: str, reason: str, diagnostics: Dict[str, Any]) -> None:
 
 
 def _publish_run(run_id: str) -> None:
-    """
-    Publish this run and make it the only active published run for the same
-    strategy/run_date.
-
-    This preserves older same-day rows, but flips is_published to FALSE so the
-    latest endpoint can safely pick the new official snapshot. It also prevents
-    unique-index failures when you manually rerun the job on the same date.
-    """
+    """Publish once. The unique index rejects replacement of a published day."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -427,23 +469,10 @@ def _publish_run(run_id: str) -> None:
             cur.execute(
                 """
                 UPDATE portfolio_runs
-                SET is_published = FALSE
-                WHERE strategy = %s
-                  AND run_date = %s
-                  AND id <> %s
-                  AND status = 'published'
-                  AND is_published = TRUE
-                """,
-                (strategy, run_date, run_id),
-            )
-
-            cur.execute(
-                """
-                UPDATE portfolio_runs
                 SET status = 'published',
                     is_published = TRUE,
                     published_at = now()
-                WHERE id = %s
+                WHERE id = %s AND status = 'draft' AND is_published = FALSE
                 """,
                 (run_id,),
             )
@@ -451,10 +480,43 @@ def _publish_run(run_id: str) -> None:
 
 
 def _run_strategy(strategy: str, run_date: date, dry_run: bool) -> bool:
+    # A transaction-scoped lock spans build + publication, including separate
+    # writer connections, and is released automatically on crash/rollback.
+    with get_connection() as lock_conn:
+        with lock_conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("portfolio:" + strategy,))
+        return _run_strategy_locked(strategy, run_date, dry_run)
+
+
+def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
     print(f"[{strategy}] Building portfolio snapshot for {run_date.isoformat()}")
     previous = _load_latest_published(strategy)
+    if previous and previous["run_date"] == run_date:
+        print(f"[{strategy}] Already published {previous['id']}; unchanged")
+        return True
+    if previous and previous["run_date"] > run_date:
+        raise ValueError("Cannot publish a backdated run over established history")
+    if run_date != _now_et().date():
+        raise ValueError("New decisions must use today's publication date; backdating is disabled")
+    if not previous:
+        raise ValueError("Published opening records required before ledger migration")
+    _assert_publication_guards()
     previous_payload = previous["payload"] if previous else None
-    payload = _json_sanitize(_build_strategy_payload(strategy))
+    candidate = _json_sanitize(_build_strategy_payload(strategy))
+    from api.deps import get_regime, get_macro, get_prices
+    if get_macro().empty or get_prices().empty:
+        raise ValueError("Macro inputs unavailable; published allocation unchanged")
+    price_date = get_prices().dropna(how="all").index[-1].date()
+    if (run_date - price_date).days > 7:
+        raise ValueError("Macro market inputs are stale; published allocation unchanged")
+    regime = get_regime()
+    old_book = previous_payload.get("ledger") or {}
+    symbols = {r["ticker"] for r in candidate.get("holdings", []) + previous_payload.get("holdings", [])}
+    symbols.update(r["ticker"] for r in (old_book.get("pending") or {}).get("holdings", []))
+    series = (previous_payload.get("performance") or {}).get("series") or []
+    anchor = old_book.get("as_of") or (series[-1]["date"] if series else None)
+    market = load_market(symbols, run_date, anchor)
+    payload = _json_sanitize(build_ledger(candidate, previous, _load_published_history(strategy), market, run_date, regime.score))
     official = _official_rebalance_diff(previous_payload, payload, run_date)
     payload["official_rebalance"] = official
 
@@ -473,6 +535,9 @@ def _run_strategy(strategy: str, run_date: date, dry_run: bool) -> bool:
     if dry_run:
         print(json.dumps(diagnostics, indent=2))
         return valid
+
+    if run_date != _now_et().date():
+        raise ValueError("Publication crossed midnight; build a new dated decision")
 
     config = {
         **STRATEGY_CONFIGS[strategy]["config"],

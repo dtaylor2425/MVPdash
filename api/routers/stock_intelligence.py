@@ -17,6 +17,7 @@ fields vary by security and yfinance releases can add or remove fields.
 from __future__ import annotations
 
 import math
+import re
 import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1815,12 +1816,77 @@ def _earnings_reactions(
     }
 
 
+def _currency_code(value: Any) -> Optional[str]:
+    """Keep minor quote units distinct: GBp is not the same unit as GBP."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if value in {"GBp", "GBX", "ZAc", "ILA"}:
+        return value
+    return value.upper() if len(value) == 3 and value.isalpha() else None
+
+
+def _valuation_currency_validation(info: Dict[str, Any]) -> Dict[str, Any]:
+    """Never infer FX or depositary-share conversions from price ratios.
+
+    Yahoo does not supply a verified ADR/ordinary-share reconciliation here.
+    Foreign issuers on US exchanges are therefore conservatively withheld even
+    when their financials are in USD; matching currency alone is insufficient.
+    """
+    quote = _currency_code(info.get("currency"))
+    financial = _currency_code(info.get("financialCurrency"))
+    reasons = []
+    messages = []
+    if quote is None or financial is None:
+        reasons.append("currency_unknown")
+        messages.append("Quote or financial reporting currency is unavailable.")
+    elif quote != financial:
+        reasons.append("currency_mismatch")
+        messages.append(
+            f"Financial statements are reported in {financial}; quotes are in "
+            f"{quote}. No verified currency conversion is available."
+        )
+    name = " ".join(str(info.get(key) or "") for key in ("longName", "shortName", "quoteType"))
+    depositary = bool(re.search(r"\b(ADR|ADS|depositary|depository)\b", name, re.I))
+    us_exchange = str(info.get("exchange") or "").upper() in {
+        "NYQ", "NMS", "NGM", "NCM", "ASE", "PCX", "BTS", "PNK", "OQB", "OQX",
+    }
+    country = str(info.get("country") or "").strip().lower()
+    foreign_us_listing = us_exchange and country not in {"united states", "usa", "us"}
+    if depositary or foreign_us_listing:
+        reasons.append("share_basis_unverified")
+        messages.append("The listed-share and issuer reporting basis has not been reconciled (including any ADR ratio).")
+    return {
+        "status": "suppressed" if reasons else "available",
+        "reason_codes": reasons,
+        "reason": " ".join(messages) or None,
+        "quote_currency": quote,
+        "financial_currency": financial,
+        "share_basis": "unverified" if depositary or foreign_us_listing else "provider_reported",
+        "fx_conversion_applied": False,
+    }
+
+
+def _label_financial_model(model: Dict[str, Any], info: Dict[str, Any]) -> Dict[str, Any]:
+    currency = _currency_code(info.get("financialCurrency"))
+    model["currency"] = currency
+    model["currency_source"] = "financialCurrency" if currency else None
+    model["eps_basis"] = "issuer_reported"
+    for row in model.get("rows", []):
+        if row.get("format") == "currency" or row.get("key") == "eps":
+            row["currency"] = currency
+    return model
+
+
 def _valuation_snapshot(
     info: Dict[str, Any],
     model: Dict[str, Any],
 ) -> Dict[str, Any]:
     records = model.get("records") or []
     latest = records[-1] if records else {}
+
+    validation = _valuation_currency_validation(info)
+    comparable = validation["status"] == "available"
 
     market_cap = _finite(info.get("marketCap"))
     enterprise_value = _finite(info.get("enterpriseValue"))
@@ -1851,7 +1917,7 @@ def _valuation_snapshot(
             "label": "Price / Sales",
             "value": (
                 _safe_div(market_cap, revenue)
-                if revenue is not None
+                if revenue is not None and comparable
                 else _finite(info.get("priceToSalesTrailing12Months"))
             ),
             "format": "multiple",
@@ -1867,7 +1933,7 @@ def _valuation_snapshot(
             "label": "EV / Revenue",
             "value": (
                 _safe_div(enterprise_value, revenue)
-                if revenue is not None
+                if revenue is not None and comparable
                 else _finite(info.get("enterpriseToRevenue"))
             ),
             "format": "multiple",
@@ -1875,13 +1941,13 @@ def _valuation_snapshot(
         {
             "key": "fcf_yield",
             "label": "FCF Yield",
-            "value": _safe_div(free_cash_flow, market_cap),
+            "value": _safe_div(free_cash_flow, market_cap) if comparable else None,
             "format": "percent",
         },
         {
             "key": "earnings_yield",
             "label": "Earnings Yield",
-            "value": _safe_div(net_income, market_cap),
+            "value": _safe_div(net_income, market_cap) if comparable else None,
             "format": "percent",
         },
     ]
@@ -1898,7 +1964,8 @@ def _valuation_snapshot(
     required_year_5_net_income = None
 
     if (
-        market_cap is not None
+        comparable
+        and market_cap is not None
         and current_revenue is not None
         and current_revenue > 0
         and current_margin is not None
@@ -1914,14 +1981,28 @@ def _valuation_snapshot(
             ) ** (1.0 / 5.0) - 1.0
 
     return {
+        "currency_validation": validation,
         "metrics": [
             {
                 **metric,
                 "value": _clean_scalar(metric["value"]),
+                "source": (
+                    "derived" if metric["key"] in {"fcf_yield", "earnings_yield"}
+                    or (metric["key"] in {"price_sales", "ev_revenue"} and revenue is not None and comparable)
+                    else "provider_reported"
+                ),
+                "unavailable_reason": (
+                    validation["reason"]
+                    if not comparable and metric["key"] in {"fcf_yield", "earnings_yield"}
+                    else None
+                ),
             }
             for metric in metrics
         ],
         "reverse_expectations": {
+            "currency": validation["financial_currency"],
+            "status": validation["status"],
+            "unavailable_reason": validation["reason"],
             "terminal_pe": terminal_pe,
             "current_revenue": current_revenue,
             "current_net_margin": current_margin,
@@ -1942,6 +2023,8 @@ def _scenario_valuation(
     info: Dict[str, Any],
     model: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
+    if _valuation_currency_validation(info)["status"] != "available":
+        return []
     records = model.get("records") or []
     latest = records[-1] if records else {}
 
@@ -2007,6 +2090,8 @@ def _scenario_valuation(
         output.append(
             {
                 "name": case["name"],
+                "currency": _currency_code(info.get("currency")),
+                "financial_currency": _currency_code(info.get("financialCurrency")),
                 "revenue_cagr": case["growth"],
                 "net_margin": case["margin"],
                 "exit_pe": case["pe"],
@@ -2175,6 +2260,7 @@ def _peer_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
 
     return {
         "ticker": symbol,
+        "currency": _currency_code(info.get("currency")),
         "name": (
             info.get("shortName")
             or info.get("longName")
@@ -2429,7 +2515,9 @@ def _company_profile(info: Dict[str, Any], symbol: str) -> Dict[str, Any]:
         "summary": info.get("longBusinessSummary"),
         "market_cap": _clean_scalar(info.get("marketCap")),
         "enterprise_value": _clean_scalar(info.get("enterpriseValue")),
-        "currency": info.get("currency") or "USD",
+        "currency": _currency_code(info.get("currency")),
+        "quote_currency": _currency_code(info.get("currency")),
+        "financial_currency": _currency_code(info.get("financialCurrency")),
         "exchange": info.get("exchange"),
     }
 
@@ -2475,7 +2563,7 @@ def _full_stock_payload(symbol: str) -> Dict[str, Any]:
         else None
     )
 
-    model = _build_financial_model(ticker)
+    model = _label_financial_model(_build_financial_model(ticker), info)
     velocity = _fundamental_velocity(ticker)
     revisions = _revision_summary(ticker)
     valuation = _valuation_snapshot(info, model)
@@ -2548,6 +2636,7 @@ def _full_stock_payload(symbol: str) -> Dict[str, Any]:
         "earnings": earnings,
         "valuation": valuation,
         "scenarios": scenarios,
+        "scenario_validation": _valuation_currency_validation(info),
         "relative_performance": relative,
         "options": {
             key: _clean_scalar(value)

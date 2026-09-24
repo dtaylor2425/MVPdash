@@ -18,6 +18,7 @@ import streamlit as st
 
 from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES, YF_PROXIES
 from src.data_sources import fetch_prices, get_fred_cached
+from src.monthly_data import monthly_year_over_year
 from src.ranges import RANGES, slice_df, slice_series
 from src.ui import inject_css, sidebar_nav, safe_switch_page
 
@@ -93,8 +94,8 @@ c210_3m      = _delta(curve_2_10, 90)
 
 # CPI YoY
 cpi_yoy = None
-if len(cpi_s) >= 13:
-    cpi_yoy_s = cpi_s.pct_change(12).dropna() * 100
+if not cpi_s.empty:
+    cpi_yoy_s = monthly_year_over_year(cpi_s).dropna()
     cpi_yoy = _last(cpi_yoy_s)
 
 # Percentile rank of 2-10 spread vs 5y history

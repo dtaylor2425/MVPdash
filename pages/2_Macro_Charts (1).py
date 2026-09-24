@@ -15,6 +15,7 @@ import streamlit as st
 
 from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES, YF_PROXIES
 from src.data_sources import fetch_prices, get_fred_cached
+from src.monthly_data import monthly_year_over_year
 from src.ranges import RANGES, slice_series
 from src.ui import inject_css, sidebar_nav, safe_switch_page
 
@@ -72,7 +73,7 @@ def _pct_rank(s, w=252):
 
 def cpi_yoy():
     c = _col("cpi")
-    return (c.pct_change(12) * 100).dropna() if len(c) >= 13 else None
+    return monthly_year_over_year(c).dropna() if not c.empty else None
 
 def fmt(x, nd=2, suffix="", plus=False):
     if x is None or (isinstance(x, float) and np.isnan(x)): return "—"

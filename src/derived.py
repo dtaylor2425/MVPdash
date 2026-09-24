@@ -6,6 +6,7 @@ Computed / derived macro series.
 import numpy as np
 import pandas as pd
 from typing import Callable, Dict
+from src.monthly_data import monthly_year_over_year
 
 
 def _find_col(df, *names):
@@ -72,9 +73,8 @@ def hy_ig_diff(macro, px):
 def real_fed_funds(macro, px):
     if "fed_funds" not in macro.columns or "cpi" not in macro.columns:
         return pd.Series(dtype=float)
-    ff = macro["fed_funds"].dropna(); cpi = macro["cpi"].dropna()
-    if len(cpi) < 13: return pd.Series(dtype=float)
-    cpi_yoy = cpi.pct_change(12).dropna() * 100.0
+    ff = macro["fed_funds"].dropna()
+    cpi_yoy = monthly_year_over_year(macro["cpi"]).dropna()
     idx = ff.index.intersection(cpi_yoy.index)
     if len(idx) == 0: return pd.Series(dtype=float)
     return (ff.reindex(idx) - cpi_yoy.reindex(idx)).dropna()
@@ -82,9 +82,7 @@ def real_fed_funds(macro, px):
 
 def cpi_yoy(macro, px):
     if "cpi" not in macro.columns: return pd.Series(dtype=float)
-    cpi = macro["cpi"].dropna()
-    if len(cpi) < 13: return pd.Series(dtype=float)
-    return (cpi.pct_change(12) * 100).dropna()
+    return monthly_year_over_year(macro["cpi"]).dropna()
 
 
 def _ratio(names_a, names_b):

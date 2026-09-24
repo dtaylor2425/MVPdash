@@ -13,6 +13,7 @@ import yfinance as yf
 
 from src.config import CACHE_DIR, FRED_API_KEY, FRED_SERIES, YF_PROXIES
 from src.regime import compute_regime_v3
+from src.monthly_data import CPI_CACHE_SUFFIX, align_macro_observations
 
 _cache = {}
 
@@ -43,7 +44,7 @@ def _store(key, value):
 
 
 def _parquet_path():
-    return Path(CACHE_DIR) / "fred_macro.parquet"
+    return Path(CACHE_DIR) / ("fred_macro" + CPI_CACHE_SUFFIX + ".parquet")
 
 
 def _load_from_disk():
@@ -52,7 +53,7 @@ def _load_from_disk():
         try:
             df = pd.read_parquet(p)
             df.index = pd.to_datetime(df.index)
-            return df.sort_index().ffill()
+            return align_macro_observations(df)
         except Exception as e:
             print("disk load error: {}".format(e))
     return pd.DataFrame()

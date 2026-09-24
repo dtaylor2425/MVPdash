@@ -1077,7 +1077,7 @@ def _simulate(rows: List[Dict[str, Any]], price_frame: pd.DataFrame, target_hold
     return {"series": series, "rebalance_log": log[-16:], "stats": stats, "diagnostics": {"history_count": len(histories)}}
 
 
-def _build_payload(target_holdings: int, max_tickers: int, tickers: Optional[str], min_score: float) -> Dict[str, Any]:
+def _build_payload(target_holdings: int, max_tickers: int, tickers: Optional[str], min_score: float, include_history: bool = True) -> Dict[str, Any]:
     started_at = time.time()
     target_holdings = max(MIN_TARGET_HOLDINGS, min(MAX_TARGET_HOLDINGS, int(target_holdings)))
     universe_key, ticker_list = _get_universe(tickers, max_tickers)
@@ -1116,7 +1116,7 @@ def _build_payload(target_holdings: int, max_tickers: int, tickers: Optional[str
         sector_weights[sector] = sector_weights.get(sector, 0) + weight
         theme_weights[theme] = theme_weights.get(theme, 0) + weight
 
-    performance = _simulate(rows, price_frame, target_holdings)
+    performance = _simulate(rows, price_frame, target_holdings) if include_history else {}
 
     payload = {
         "generated_at": datetime.utcnow().isoformat() + "Z",

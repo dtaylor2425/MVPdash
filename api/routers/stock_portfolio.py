@@ -1079,6 +1079,7 @@ def _build_portfolio(
     max_tickers: int,
     target_holdings: int,
     min_score: float,
+    include_history: bool = True,
 ) -> Dict[str, Any]:
     if _rankings_get_universe is None or _rankings_scan is None:
         raise HTTPException(
@@ -1180,7 +1181,7 @@ def _build_portfolio(
         ranking_rows=ranking_rows,
         price_frame=price_frame,
         target_holdings=target_holdings,
-    )
+    ) if include_history else {}
 
     generated_at = datetime.utcnow().isoformat() + "Z"
 
