@@ -68,6 +68,17 @@ def first_remaining_date(conn, ticker: str, sessions: List[date]) -> Optional[da
     return None
 
 
+def count_done(conn, ticker: str, sessions: List[date]) -> int:
+    """How many sessions currently have a full_flow success/partial row -- used (instead of
+    "is the first remaining date the same") to detect genuine stalls. A single persistently
+    flaky date (e.g. one transient ThetaData 502) sitting at the FRONT of the remaining range
+    would make "first remaining date" look unchanged forever even while every later date keeps
+    succeeding -- comparing the total count avoids that false stall and avoids one bad date
+    blocking the whole ticker (let alone the whole orchestrator)."""
+    from api.services.options_flow_store import backfill_existing
+    return len(backfill_existing(conn, [ticker], sessions[0], sessions[-1], mode="full_flow"))
+
+
 def print_status(sessions: List[date]) -> None:
     import psycopg
     from psycopg.rows import dict_row
@@ -117,16 +128,31 @@ def main() -> int:
         print_status(sessions)
         return 0
 
+    MAX_RETRIES_PER_TICKER = 6
+    incomplete_tickers: List[str] = []
+
     import psycopg
     from psycopg.rows import dict_row
     conn = psycopg.connect(_get_database_url(), row_factory=dict_row, autocommit=True)
     try:
         for ticker in TICKERS:
+            attempt = 0
             while True:
                 nxt = first_remaining_date(conn, ticker, sessions)
                 if nxt is None:
                     print(f"{ticker}: already complete for the full v3 range.")
                     break
+                attempt += 1
+                if attempt > MAX_RETRIES_PER_TICKER:
+                    still_missing = len(sessions) - count_done(conn, ticker, sessions)
+                    print(f"{ticker}: still {still_missing} date(s) unconverted (first: {nxt}) "
+                         f"after {MAX_RETRIES_PER_TICKER} attempts -- a persistently failing "
+                         f"date, not an infinite loop (other dates keep succeeding). Moving on "
+                         f"to the next ticker; investigate {ticker} {nxt} separately, then "
+                         f"re-run this script (it will pick up exactly what's missing).")
+                    incomplete_tickers.append(ticker)
+                    break
+                total_before = count_done(conn, ticker, sessions)
                 code = run_one_ticker_leg(ticker, nxt, sessions[-1])
                 if code == 3:
                     print(f"FATAL error classification from the backfill CLI for {ticker} "
@@ -137,15 +163,24 @@ def main() -> int:
                     print("Backfill CLI was interrupted (exit 130) -- stopping the orchestrator.")
                     return 130
                 # 0 (all done), 1 (nothing published/refused), 2 (partial) all fall through to
-                # re-check what's actually left in Postgres and continue -- ground truth, not
-                # the exit code, decides whether to keep looping on this ticker.
-                nxt_after = first_remaining_date(conn, ticker, sessions)
-                if nxt_after == nxt:
-                    print(f"{ticker}: {nxt} still not converted after a leg with exit {code} -- "
-                         f"stopping to avoid an infinite loop; investigate before re-running.")
-                    return 1
+                # re-check what's actually left in Postgres and continue -- ground truth (the
+                # TOTAL count of converted dates, not just whether the first remaining date
+                # happens to be unchanged), not the exit code, decides whether to keep looping.
+                total_after = count_done(conn, ticker, sessions)
+                if total_after == total_before:
+                    print(f"{ticker}: no additional dates converted on attempt {attempt} "
+                         f"(leg exit {code}, still stuck at {nxt}) -- will retry "
+                         f"({attempt}/{MAX_RETRIES_PER_TICKER}).")
+                else:
+                    print(f"{ticker}: {total_after - total_before} more date(s) converted this "
+                         f"attempt ({total_after}/{len(sessions)} total).")
     finally:
         conn.close()
+
+    if incomplete_tickers:
+        print(f"v3 validation+warmup backfill: STOPPED WITH GAPS in {incomplete_tickers} -- "
+             f"re-run this script after investigating; every other ticker is complete.")
+        return 2
 
     print("v3 validation+warmup backfill: ALL TICKERS COMPLETE.")
     return 0
