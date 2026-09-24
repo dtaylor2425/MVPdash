@@ -56,6 +56,11 @@ def _now_et() -> datetime:
     return datetime.now(tz=NY_TZ)
 
 
+def _scheduled_hour_matches(now: datetime, hour: int) -> bool:
+    """Railway cron is UTC; allow only the matching New York hour."""
+    return now.astimezone(NY_TZ).hour == hour
+
+
 def _market_is_open(run_date: date) -> bool:
     try:
         import pandas_market_calendars as mcal
@@ -173,7 +178,11 @@ def _assert_publication_guards():
                             'portfolio_performance'::regclass, 'portfolio_rebalances'::regclass)""")
             active = {r["tgname"] for r in cur.fetchall()}
     if required - active:
-        raise ValueError("Apply sql/002_portfolio_publication_immutability.sql before publishing")
+        raise ValueError(
+            "Publication guards missing: " + ", ".join(sorted(required - active)) +
+            ". Run python scripts/run_portfolio_immutability_migration.py "
+            "--backup <new-backup-path.json> against this job's database before publishing"
+        )
 
 
 def _official_rebalance_diff(
@@ -575,7 +584,13 @@ def main() -> None:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--run-date")
+    parser.add_argument("--scheduled-hour", type=int, choices=range(24),
+                        help="Only run during this New York hour (omit for a manual catch-up)")
     args = parser.parse_args()
+
+    if args.scheduled_hour is not None and not _scheduled_hour_matches(_now_et(), args.scheduled_hour):
+        print(f"Outside scheduled New York hour {args.scheduled_hour:02d}:00; skipping.")
+        return
 
     if not args.all and not args.strategy:
         raise SystemExit("Use --all or --strategy <name>")

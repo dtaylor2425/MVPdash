@@ -15,6 +15,11 @@ def historical_share_bars(data, end):
     bars = []
     factor = 1.0
     for timestamp, row in data.sort_index(ascending=False).iterrows():
+        # Multi-ticker downloads align each ticker to the union of dates.
+        # An entirely empty alignment row is not a reported corporate action.
+        # Do not fabricate a bar: required sessions are checked by the ledger.
+        if row.isna().all():
+            continue
         split = float(row.get("Stock Splits", 0) or 0)
         if not math.isfinite(split) or split < 0:
             raise ValueError("Invalid corporate-action data")

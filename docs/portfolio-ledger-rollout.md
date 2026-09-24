@@ -54,11 +54,19 @@ Relative volume compares the latest completed session with the preceding 20 sess
 ## Deployment sequence
 
 1. Export/backup published runs and child rows, including inactive same-day published records. Preserve a copy of each latest curve, entry register, and publication ID. Pause the old portfolio scheduler during migration.
-2. Apply `sql/002_portfolio_publication_immutability.sql` after the existing schema, first in staging. It does not rewrite existing data. The new publisher refuses a new publication if the required triggers are absent.
+2. Apply `sql/002_portfolio_publication_immutability.sql` after the existing schema, first in staging. Use `python scripts/run_portfolio_immutability_migration.py --backup <new-backup-path.json>` with the publisher's database environment. The runner backs up all four portfolio tables, holds publisher/table locks, and verifies every existing row is unchanged before committing. Choose a persistent backup location; the script refuses to overwrite an existing backup. The older `run_portfolio_snapshot_migration.py` only installs schema 001 and does not install these guards. The new publisher refuses a new publication if the required triggers are absent.
 3. Deploy the updated backend and frontend together. The read-only snapshot API can enrich legacy entries and reconcile displayed legacy exposure without rewriting stored historical payloads. Legacy suggestions are not presented as recorded executions.
 4. Refresh the new native-CPI cache, verify source observations and macro confidence/freshness, and revalidate affected calibration statements. Refresh affected currency-aware stock snapshots. Do not republish portfolio history to incorporate these corrections.
 5. Run `python jobs/nightly_portfolio_refresh.py --all --dry-run` using the current publication date and normal configured environment. Review entry references, completed bars, macro target, SPY reserve, guards, and preserved curve prefix. If today's run already exists, the job correctly skips it; first migration publication must be on a later date.
 6. Run the scheduled publisher for that later date. Verify the first ledger publication, next eligible execution, actual cash/weights, dated entry references, and same-day rerun identity. Confirm prior payloads and curves still match the backup.
 7. Resume the updated scheduler. On missing prices, revised anchors, stale macro market data, or failed guards, preserve the last publication and investigate. Do not disable immutability guards or revert to the old curve-rebuilding publisher as a rollback.
 
-The portfolio code and isolated checks are complete for this pass. Deployment, real-provider migration rehearsal, and refreshed-data calibration verification remain outstanding; the live website still uses its existing release.
+## Production recovery — September 24, 2026
+
+The immutability migration was applied after backing up 64 runs, 719 positions, 14,616 performance rows, and 58 rebalance rows. Every original row was verified unchanged after migration and after publication. Real-provider dry-runs passed for both strategies. The market parser now ignores entirely empty rows introduced by multi-ticker date alignment, while retaining invalid-action and required-session checks.
+
+Both first ledger publications succeeded: Stock Alpha `7e535291-873e-4c80-8af0-899bb7ca1700` and SMID `dd0fd2e6-73a1-4b9c-9e2f-5b1ef848af68`. They preserve prior curves, mark positions using September 23 completed prices, and publish a 78.2% long target eligible from September 25. The transition does not invent historical trades or immediately replace existing allocations.
+
+The Railway portfolio job uses cron `0 19,20 * * 1-5` with start command `python jobs/nightly_portfolio_refresh.py --all --scheduled-hour 15`. The New York timezone guard permits one daily run at 3 p.m. local time across daylight saving; the other UTC trigger exits before accessing the database. Market holidays are skipped. For a manual catch-up outside that hour, omit `--scheduled-hour`; do not backdate or bypass publication guards. New decisions retain the next-session opening reference convention; daily publication uses completed-session valuations.
+
+Source-data calibration verification beyond the portfolio dry-run remains separate follow-up work.
