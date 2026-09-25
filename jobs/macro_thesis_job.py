@@ -115,6 +115,9 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
+    if not FRED_API_KEY:
+        raise RuntimeError("FRED_API_KEY is required; existing snapshot retained")
+
     print("[macro_thesis] fetching FRED series...")
     macro = get_fred_cached(FRED_SERIES, FRED_API_KEY, CACHE_DIR, cache_name="fred_macro")
     extra = get_fred_cached(EXTRA_FRED_SERIES, FRED_API_KEY, CACHE_DIR, cache_name="fred_macro_thesis")
@@ -125,6 +128,8 @@ def main() -> None:
     print("[macro_thesis] fetching full price history for {} tickers...".format(len(ALL_PRICE_TICKERS)))
     prices = _fetch_full_prices()
     print("[macro_thesis] prices shape:", prices.shape)
+    if macro.empty or extra.empty or prices.empty:
+        raise RuntimeError("Required macro or market inputs are empty; existing snapshot retained")
 
     house_view = None
     if not args.dry_run:
@@ -149,11 +154,13 @@ def main() -> None:
         print(json.dumps({"asOf": payload["asOf"], "quadrant": quadrant_row}, indent=2, default=str))
         return
 
-    DISK_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
-    DISK_SNAPSHOT.write_text(json.dumps(payload, default=str), encoding="utf-8")
-
     with get_connection() as conn:
         _publish(conn, payload, quadrant_row)
+
+    DISK_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+    temporary = DISK_SNAPSHOT.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, default=str), encoding="utf-8")
+    temporary.replace(DISK_SNAPSHOT)
 
     print("[macro_thesis] published {} (quadrant={})".format(payload["asOf"], payload["quadrant"]["name"]))
 

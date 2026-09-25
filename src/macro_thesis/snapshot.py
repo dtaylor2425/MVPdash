@@ -194,6 +194,10 @@ def build_thesis_snapshot(
 
     return {
         "asOf": as_of.date().isoformat(),
+        "dataDates": {
+            "modelMonth": monthly.index.max().strftime("%Y-%m") if not monthly.empty else None,
+            "marketPricesThrough": prices_full.dropna(how="all").index.max().date().isoformat() if not prices_full.dropna(how="all").empty else None,
+        },
         "quadrant": {
             "name": quadrant,
             "quadrantStrength": current.get("quadrantStrength"),
