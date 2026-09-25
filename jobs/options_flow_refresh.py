@@ -84,6 +84,7 @@ from api.services.options_flow_calendar import (  # noqa: E402
     target_trading_date,
 )
 from api.services.options_flow_config import load_config, load_universe, ticker_groups  # noqa: E402
+from api.services.options_flow_lock import LOCK_KEY  # share vendor-session exclusion with backfill
 from api.services.options_flow_metrics import (  # noqa: E402
     StageTimer,
     _NullTimer,
@@ -374,6 +375,11 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None, conn_factory: Opt
     try:
         if not args.dry_run:
             conn = conn_factory()
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (LOCK_KEY,))
+                if not cur.fetchone()["acquired"]:
+                    log("Another options-flow collector/backfill is running; skipping overlap.")
+                    return 0
             store.ensure_schema(conn)
             end = session_end(market_date)
             if not args.force and end is not None and store.final_run_exists(conn, market_date, end):
@@ -381,6 +387,9 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None, conn_factory: Opt
                 return 0
             run_id = store.create_run(conn, market_date, cfg)
 
+        collection_started = datetime.now(timezone.utc)
+        close = session_end(market_date)
+        final_collection = close is not None and collection_started >= close + timedelta(minutes=15)
         fetcher = fetcher or ThetaFetcher(cfg)
 
         snapshots: List[Dict[str, Any]] = []
@@ -395,6 +404,14 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None, conn_factory: Opt
                 if conn is not None:
                     history = store.load_iv_history(conn, t, market_date, int(cfg["ivHistoryDays"]))
                 payload, meta = process_ticker(fetcher, t, groups[t], market_date, cfg, history)
+                payload["publication"] = {
+                    "state": "final" if final_collection else "partial",
+                    "collectionBounds": {"start": cfg["sessionStart"], "end": cfg["sessionEnd"],
+                                         "timezone": "America/New_York", "maxDte": cfg["maxDte"]},
+                    "collectionStartedAt": collection_started.isoformat(),
+                    "sessionEnd": close.isoformat() if close else None,
+                    "meaning": "Completed collection window, not certainty of trade intent",
+                }
                 log_ticker_summary(t, payload)
                 as_of = _parse_iso(payload["asOf"]) or datetime.now(timezone.utc)
                 snapshots.append({"ticker": t, "group": groups[t], "as_of": as_of, "payload": payload})
@@ -416,6 +433,8 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None, conn_factory: Opt
         status = "failed" if not snapshots else ("partial" if failed else "success")
         as_of_run = max((s["as_of"] for s in snapshots), default=datetime.now(timezone.utc))
         diagnostics = {
+            "publicationState": "final" if final_collection and not failed and set(tickers) == set(groups) else "partial",
+            "requestedTickers": tickers,
             "marketDate": market_date.isoformat(), "dryRun": bool(args.dry_run),
             "tickers": per_ticker, "failed": failed, "warnings": all_warnings,
             "durationSec": round(time.time() - started, 1),

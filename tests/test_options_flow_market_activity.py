@@ -172,7 +172,7 @@ def test_attach_market_activity_wires_fields_when_snapshot_available(monkeypatch
         "tickers": ["SPY", "QQQ"],
     }
     import api.services.options_flow_market_activity as activity_module
-    monkeypatch.setattr(activity_module, "compute_market_activity_snapshot", lambda conn: fake_snapshot)
+    monkeypatch.setattr(activity_module, "compute_market_activity_snapshot", lambda conn, **kwargs: fake_snapshot)
 
     response = {"tickers": [{"ticker": "SPY"}, {"ticker": "QQQ"}]}
     store.attach_market_activity(object(), response)

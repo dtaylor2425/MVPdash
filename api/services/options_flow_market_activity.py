@@ -24,6 +24,7 @@ the historical percentile distribution, not trading thresholds and not optimized
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from api.services.options_flow_phase1_scope import PHASE1_TICKERS
+from api.services.options_flow_profile import profile_identity
 
 ROOT = Path(__file__).resolve().parents[2]
 V4_REPORT_PATH = ROOT / "reports" / "options-flow-market-factor-v4.json"
@@ -55,9 +57,10 @@ REGIME_BANDS = (
 )
 
 MIN_PERCENTILE_OBS = 20  # below this, percentile/regime are None rather than a noisy guess
+_ACTIVITY_CACHE: Dict[Any, Any] = {}
 
 
-def load_gross_premium_history(conn, tickers: Optional[List[str]] = None) -> pd.DataFrame:
+def load_gross_premium_history(conn, tickers: Optional[List[str]] = None, include_live: bool = False) -> pd.DataFrame:
     """
     All available (date, ticker, gross_premium) observations from successful/partial full_flow
     runs, for the given tickers (default ACTIVITY_TICKERS). One row per (ticker, market_date) --
@@ -68,15 +71,17 @@ def load_gross_premium_history(conn, tickers: Optional[List[str]] = None) -> pd.
         cur.execute(
             """
             SELECT DISTINCT ON (s.ticker, s.market_date)
-                   s.ticker, s.market_date,
+                   s.ticker, s.market_date, s.id::text AS snapshot_id,
+                   s.methodology_version, r.config AS collection_config,
                    (s.payload -> 'premium' ->> 'gross')::double precision AS gross_premium
             FROM options_flow_symbol_snapshots s
             JOIN options_flow_runs r ON r.id = s.run_id
-            WHERE s.mode = 'full_flow' AND s.source = 'historical_backfill'
+            WHERE s.mode = 'full_flow' AND (s.source = 'historical_backfill'
+              OR (%(include_live)s AND s.source = 'live' AND s.payload->'publication'->>'state' = 'final'))
               AND r.status IN ('success', 'partial') AND s.ticker = ANY(%(tickers)s)
-            ORDER BY s.ticker, s.market_date, s.created_at DESC
+            ORDER BY s.ticker, s.market_date, (s.source='live') DESC, s.as_of_timestamp DESC, s.created_at DESC, s.id DESC
             """,
-            {"tickers": tickers},
+            {"tickers": tickers, "include_live": include_live},
         )
         rows = cur.fetchall()
     df = pd.DataFrame(rows)
@@ -105,7 +110,7 @@ def rolling_zscore_20d(df: pd.DataFrame, col: str, ticker_col: str = "ticker") -
     return z.replace([np.inf, -np.inf], np.nan)
 
 
-def market_activity_frame(df: pd.DataFrame, min_tickers: int = 3) -> pd.DataFrame:
+def market_activity_frame(df: pd.DataFrame, min_tickers: int = 3, baseline_group_col: str = "ticker") -> pd.DataFrame:
     """
     df: (ticker, date, gross_premium) history, any order. Returns one row per (ticker, date)
     with z_gross_premium_20d, market_activity_median, market_activity_mean, n_tickers, and
@@ -115,7 +120,7 @@ def market_activity_frame(df: pd.DataFrame, min_tickers: int = 3) -> pd.DataFram
     work = df.copy()
     work["_dt"] = pd.to_datetime(work["date"])
     work = work.sort_values(["ticker", "_dt"]).reset_index(drop=True)
-    work["z_gross_premium_20d"] = rolling_zscore_20d(work, "gross_premium")
+    work["z_gross_premium_20d"] = rolling_zscore_20d(work, "gross_premium", ticker_col=baseline_group_col)
 
     by_date = work.groupby("date")["z_gross_premium_20d"]
     n_tickers = by_date.apply(lambda s: int(s.notna().sum()))
@@ -128,6 +133,30 @@ def market_activity_frame(df: pd.DataFrame, min_tickers: int = 3) -> pd.DataFram
     work = work.merge(market, left_on="date", right_index=True, how="left")
     work["residual_activity"] = work["z_gross_premium_20d"] - work["market_activity_median"]
     return work.drop(columns=["_dt"])
+
+
+def compatible_activity_segments(raw: pd.DataFrame) -> pd.DataFrame:
+    """Break operational baselines at profile changes, unknown profiles or gaps.
+
+    The same prior-20/minimum-10 calculation then operates on each uninterrupted
+    segment. Earlier rows are retained for display, never pooled across profiles.
+    """
+    from api.services.options_flow_calendar import previous_trading_day
+    work = raw.sort_values(["ticker", "date"]).reset_index(drop=True).copy()
+    profiles, segments = [], []
+    last = {}
+    for row in work.to_dict("records"):
+        ticker, day = row["ticker"], date.fromisoformat(str(row["date"]))
+        profile = profile_identity(row.get("methodology_version"), row.get("collection_config"))
+        prior = last.get(ticker)
+        same = bool(prior and profile and profile == prior[1] and previous_trading_day(day) == prior[0])
+        segment = prior[2] if same else (prior[2]+1 if prior else 0)
+        profiles.append(profile)
+        segments.append(f"{ticker}:{segment}")
+        last[ticker] = (day, profile, segment)
+    work["activity_profile"] = profiles
+    work["activity_segment"] = segments
+    return work
 
 
 def historical_percentile(current: Optional[float], history: List[Optional[float]]) -> Optional[float]:
@@ -185,6 +214,9 @@ def load_v4_research_summary() -> Optional[Dict[str, Any]]:
             return {"rho": sp.get("rho"), "pValue": sp.get("pValue"), "n": sp.get("n")}
 
         summary = {
+            "interpretation": "Descriptive activity indicator; directional forecasting is not established.",
+            "correlationPredictor": "Activity quintile labels",
+            "sampleUse": "Combined discovery and validation sample; not independent forward validation",
             "verdict": raw.get("verdict"),
             "spyReturn5d": _corr("ret_5d"),
             "spyReturn10d": _corr("ret_10d"),
@@ -200,7 +232,7 @@ def load_v4_research_summary() -> Optional[Dict[str, Any]]:
 
 
 def compute_market_activity_snapshot(
-    conn, as_of_date: Optional[date] = None, chart_sessions: int = 252,
+    conn, as_of_date: Optional[date] = None, chart_sessions: int = 252, include_live: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     The one function the API layer calls. Returns None if there isn't enough history to say
@@ -219,10 +251,25 @@ def compute_market_activity_snapshot(
           "tickers": [...],                 # ACTIVITY_TICKERS, for the frontend to iterate
         }
     """
-    raw = load_gross_premium_history(conn)
+    cache_key = None
+    if include_live:
+        # Identity changes for additions, replacements and pruning. Research reads
+        # deliberately bypass this operational cache. No unbounded per-poll pandas.
+        with conn.cursor() as cur:
+            cur.execute("""SELECT md5(string_agg(s.id::text, ',' ORDER BY s.id)) AS identity
+                FROM options_flow_symbol_snapshots s JOIN options_flow_runs r ON r.id=s.run_id
+                WHERE s.mode='full_flow' AND s.ticker=ANY(%s)
+                  AND r.status IN ('success','partial')
+                  AND (s.source='historical_backfill' OR
+                       (s.source='live' AND s.payload->'publication'->>'state'='final'))""", (ACTIVITY_TICKERS,))
+            identity = cur.fetchone()["identity"]
+        cache_key = (identity, as_of_date, chart_sessions)
+        if cache_key in _ACTIVITY_CACHE:
+            return deepcopy(_ACTIVITY_CACHE[cache_key])
+    raw = load_gross_premium_history(conn, include_live=True) if include_live else load_gross_premium_history(conn)
     if raw.empty:
         return None
-    frame = market_activity_frame(raw)
+    frame = market_activity_frame(compatible_activity_segments(raw), baseline_group_col="activity_segment") if include_live else market_activity_frame(raw)
 
     dates_sorted = sorted(frame["date"].unique())
     target_date = as_of_date.isoformat() if as_of_date else dates_sorted[-1]
@@ -237,12 +284,17 @@ def compute_market_activity_snapshot(
         frame.drop_duplicates("date")[["date", "market_activity_median", "market_activity_mean"]]
         .set_index("date")
     )
+    profiles_by_date = {}
+    if include_live:
+        for d, group in frame.groupby("date"):
+            profiles_by_date[d] = {r["ticker"]: r["activity_profile"] for r in group.to_dict("records")
+                                   if pd.notna(r["z_gross_premium_20d"]) and r["activity_profile"] is not None}
     current_value = market_series.loc[target_date, "market_activity_median"]
     current_value = None if pd.isna(current_value) else float(current_value)
     current_mean = market_series.loc[target_date, "market_activity_mean"]
     current_mean = None if pd.isna(current_mean) else float(current_mean)
 
-    prior_dates = [d for d in dates_sorted if d < target_date]
+    prior_dates = [d for d in dates_sorted if d < target_date and (not include_live or profiles_by_date[d] == profiles_by_date[target_date])]
     prior_history = [
         (None if pd.isna(v) else float(v))
         for v in market_series.loc[market_series.index.isin(prior_dates), "market_activity_median"]
@@ -256,14 +308,37 @@ def compute_market_activity_snapshot(
     residual_by_ticker = {t: (None if t not in today_rows.index or pd.isna(today_rows.loc[t, "residual_activity"])
                               else float(today_rows.loc[t, "residual_activity"])) for t in ACTIVITY_TICKERS}
 
-    chart_dates = dates_sorted[-chart_sessions:]
+    chart_dates = [d for d in dates_sorted if d <= target_date][-chart_sessions:]
     history = [
         {"date": d, "value": (None if pd.isna(market_series.loc[d, "market_activity_median"])
                               else float(market_series.loc[d, "market_activity_median"]))}
         for d in chart_dates if d in market_series.index
     ]
+    from api.services.options_flow_calendar import previous_trading_day
+    for point in history if include_live else []:
+        d = point["date"]
+        point["snapshotIds"] = frame.loc[frame["date"] == d, "snapshot_id"].tolist() if "snapshot_id" in frame.columns else []
+        vals = frame[frame["date"] == d].set_index("ticker")["z_gross_premium_20d"]
+        point["availableTickers"] = [t for t in ACTIVITY_TICKERS if t in vals.index and pd.notna(vals[t])]
+        point["collectionProfiles"] = profiles_by_date[d]
+        point["breadth"] = breadth({t: (float(vals[t]) if t in vals.index and pd.notna(vals[t]) else None) for t in ACTIVITY_TICKERS})
+        point["percentile"] = historical_percentile(point["value"], [
+            None if pd.isna(v) else float(v) for v in market_series.loc[
+                market_series.index.isin([prior for prior in dates_sorted if prior < d and profiles_by_date[prior] == profiles_by_date[d]]),
+                "market_activity_median"]])
+    # Consecutive elevated completed sessions, reset by a missing session.
+    by_day = {p["date"]: p for p in history}
+    streak, day = 0, date.fromisoformat(target_date)
+    while day.isoformat() in by_day:
+        p = by_day[day.isoformat()]
+        if include_live and p.get("collectionProfiles") != profiles_by_date[target_date]:
+            break
+        if p.get("percentile") is None or p["percentile"] < 75:
+            break
+        streak += 1
+        day = previous_trading_day(day)
 
-    return {
+    result = {
         "asOfDate": target_date,
         "value": current_value,
         "valueMean": current_mean,
@@ -274,4 +349,10 @@ def compute_market_activity_snapshot(
         "zByTicker": z_by_ticker,
         "residualByTicker": residual_by_ticker,
         "tickers": ACTIVITY_TICKERS,
+        "elevatedSessionStreak": streak,
     }
+    if cache_key is not None:
+        if len(_ACTIVITY_CACHE) >= 8:
+            _ACTIVITY_CACHE.clear()
+        _ACTIVITY_CACHE[cache_key] = deepcopy(result)
+    return result

@@ -171,7 +171,7 @@ def compute_data_status(
     if market_date != last_session:
         return {"status": STATUS_STALE, "reason": "snapshot is for {}, last session was {}".format(
             market_date, last_session), "ageMinutes": age_min}
-    close = session_bounds(market_date)[1]
+    close = session_end(market_date)
     if published_at >= close:
         return {"status": STATUS_CLOSED, "reason": None, "ageMinutes": age_min}
     return {"status": STATUS_STALE, "reason": "final post-close refresh missing", "ageMinutes": age_min}

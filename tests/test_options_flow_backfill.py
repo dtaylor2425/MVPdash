@@ -975,7 +975,8 @@ def test_pg_full_iv_warmup_backfill_run_writes_mode_column():
             row = cur.fetchone()
             assert row["s"] is None and row["atm"] is not None
         latest = store.fetch_latest(conn, {"INDEX": ["SPY"]}, {})
-        assert latest["tickers"][0]["sentiment"] is None and latest["tickers"][0]["iv"]["atm"] is not None
+        assert latest["tickers"] == [] and latest["run"] is None
+        assert latest["missing"] == ["SPY"]  # IV-only is not a flow observation
     finally:
         conn.close()
 

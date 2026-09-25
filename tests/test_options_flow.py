@@ -671,6 +671,12 @@ def _client():
 
 
 class _DummyConn:
+    def cursor(self):
+        return self
+
+    def execute(self, sql):
+        assert "SET TRANSACTION" in sql
+
     def __enter__(self):
         return self
 
@@ -681,12 +687,12 @@ class _DummyConn:
 def _patched(r, monkey):
     monkey.append((r, "get_connection", r.get_connection))
     r.get_connection = lambda: _DummyConn()
-    monkey.append((r.store, "fetch_latest", r.store.fetch_latest))
-    r.store.fetch_latest = lambda conn, uni, cfg, now=None: {"run": {"id": "x"}, "tickers": [], "groups": [], "missing": []}
-    monkey.append((r.store, "fetch_ticker", r.store.fetch_ticker))
-    r.store.fetch_ticker = lambda conn, t, uni, cfg, include_trades=True, now=None: {"ticker": {"ticker": t, "include": include_trades}}
+    monkey.append((r.publication, "latest", r.publication.latest))
+    r.publication.latest = lambda conn, uni, cfg, now=None, session=None: {"run": {"id": "x"}, "tickers": [], "groups": [], "missing": []}
+    monkey.append((r.publication, "detail", r.publication.detail))
+    r.publication.detail = lambda conn, t, include_trades=True, session=None: {"ticker": {"ticker": t, "include": include_trades}}
     monkey.append((r.store, "fetch_history", r.store.fetch_history))
-    r.store.fetch_history = lambda conn, t, days: {"ticker": t, "days": days, "series": [{"date": "x"}]}
+    r.store.fetch_history = lambda conn, t, days, session=None: {"ticker": t, "days": days, "series": [{"date": "x"}]}
     monkey.append((r.store, "fetch_status", r.store.fetch_status))
     r.store.fetch_status = lambda conn, uni, cfg, now=None: {"latestPublished": None}
 
@@ -812,6 +818,21 @@ class _Recorder:
 
 class _Conn:
     closed = False
+
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def execute(self, sql, params=None):
+        assert "pg_try_advisory_lock" in sql
+
+    def fetchone(self):
+        return {"acquired": True}
 
     def close(self):
         self.closed = True

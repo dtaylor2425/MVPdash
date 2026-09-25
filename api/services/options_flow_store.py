@@ -44,7 +44,7 @@ WITH latest AS (
     SELECT DISTINCT ON (s.ticker) s.id
     FROM options_flow_symbol_snapshots s
     JOIN options_flow_runs r ON r.id = s.run_id
-    WHERE r.status IN ('success', 'partial')
+    WHERE r.status IN ('success', 'partial') AND s.mode = 'full_flow'
     ORDER BY s.ticker, s.market_date DESC, (s.source = 'live') DESC, s.as_of_timestamp DESC, s.created_at DESC
 )
 """
@@ -61,22 +61,22 @@ SELECT s.ticker, s.group_name, s.market_date, s.as_of_timestamp, s.created_at,
        s.run_id, s.payload
 FROM options_flow_symbol_snapshots s
 JOIN options_flow_runs r ON r.id = s.run_id
-WHERE r.status IN ('success', 'partial') AND s.ticker = %(ticker)s
+WHERE r.status IN ('success', 'partial') AND s.mode = 'full_flow' AND s.ticker = %(ticker)s
 ORDER BY s.market_date DESC, (s.source = 'live') DESC, s.as_of_timestamp DESC, s.created_at DESC
 LIMIT 1
 """
 
 LATEST_RUN_SQL = """
-SELECT id, market_date, as_of_timestamp, status, created_at, finished_at, diagnostics
+SELECT id, market_date, as_of_timestamp, status, created_at, finished_at, diagnostics, source, mode, methodology_version
 FROM options_flow_runs
-WHERE status IN ('success', 'partial')
+WHERE status IN ('success', 'partial') AND mode = 'full_flow'
 ORDER BY market_date DESC, (source = 'live') DESC, created_at DESC
 LIMIT 1
 """
 
 # The live worker's own last run -- thousands of backfill runs must never shadow it.
 LAST_RUN_ANY_SQL = """
-SELECT id, market_date, as_of_timestamp, status, created_at, finished_at, diagnostics
+SELECT id, market_date, as_of_timestamp, status, created_at, finished_at, diagnostics, source, mode, methodology_version
 FROM options_flow_runs
 WHERE source = 'live'
 ORDER BY created_at DESC
@@ -89,8 +89,11 @@ SELECT market_date, as_of_timestamp, payload FROM (
            (s.payload - %(heavy)s::text[]) AS payload
     FROM options_flow_symbol_snapshots s
     JOIN options_flow_runs r ON r.id = s.run_id
-    WHERE r.status IN ('success', 'partial') AND s.ticker = %(ticker)s
-    ORDER BY s.market_date DESC, s.as_of_timestamp DESC, s.created_at DESC
+    WHERE r.status IN ('success', 'partial') AND s.mode = 'full_flow' AND s.ticker = %(ticker)s
+      AND (%(session)s::date IS NULL OR s.market_date <= %(session)s)
+    ORDER BY s.market_date DESC,
+      (s.source='historical_backfill' OR s.payload->'publication'->>'state'='final') DESC NULLS LAST,
+      (s.source='live') DESC, s.as_of_timestamp DESC, s.created_at DESC, s.id DESC
     LIMIT %(days)s
 ) t
 ORDER BY market_date ASC
@@ -185,7 +188,9 @@ def final_run_exists(conn, market_date: date, after: datetime) -> bool:
         cur.execute(
             """
             SELECT 1 FROM options_flow_runs
-            WHERE market_date = %s AND status IN ('success', 'partial') AND created_at >= %s
+            WHERE market_date = %s AND status = 'success' AND source = 'live'
+              AND mode = 'full_flow' AND created_at >= %s
+              AND diagnostics->>'publicationState' = 'final'
             LIMIT 1
             """,
             (market_date, after),
@@ -213,11 +218,14 @@ def prune(conn, market_date: date, retention_days: int) -> Tuple[int, int]:
         cur.execute(
             """
             DELETE FROM options_flow_symbol_snapshots
-            WHERE market_date < %(cutoff)s
+            WHERE market_date < %(cutoff)s AND source = 'live'
               AND id NOT IN (
-                  SELECT DISTINCT ON (ticker, market_date) id
+                  SELECT DISTINCT ON (ticker, market_date, mode) id
                   FROM options_flow_symbol_snapshots
-                  ORDER BY ticker, market_date, as_of_timestamp DESC, created_at DESC
+                  WHERE source = 'live'
+                  ORDER BY ticker, market_date, mode,
+                    (payload->'publication'->>'state'='final') DESC NULLS LAST,
+                    as_of_timestamp DESC, created_at DESC, id DESC
               )
             """,
             {"cutoff": cutoff},
@@ -226,7 +234,7 @@ def prune(conn, market_date: date, retention_days: int) -> Tuple[int, int]:
         cur.execute(
             """
             DELETE FROM options_flow_runs r
-            WHERE r.market_date < %(cutoff)s AND r.status <> 'running'
+            WHERE r.market_date < %(cutoff)s AND r.status <> 'running' AND r.source = 'live'
               AND NOT EXISTS (SELECT 1 FROM options_flow_symbol_snapshots s WHERE s.run_id = r.id)
             """,
             {"cutoff": cutoff},
@@ -454,6 +462,8 @@ def _run_meta(run: Optional[Dict[str, Any]], cfg: Dict[str, Any], now: Optional[
         "asOf": _iso(run["as_of_timestamp"]),
         "publishedAt": _iso(run["finished_at"] or run["created_at"]),
         "status": run["status"],
+        "source": run.get("source"), "mode": run.get("mode"),
+        "methodologyVersion": run.get("methodology_version"),
         "dataStatus": ds["status"],
         "dataStatusReason": ds["reason"],
         "ageMinutes": ds["ageMinutes"],
@@ -539,7 +549,7 @@ def fetch_latest(conn, universe: Dict[str, List[str]], cfg: Dict[str, Any], now:
     return out
 
 
-def attach_market_activity(conn, response: Dict[str, Any]) -> None:
+def attach_market_activity(conn, response: Dict[str, Any], as_of_date: Optional[date] = None) -> None:
     """
     Mutates `response` in place: adds a top-level `marketActivity` block (current
     market_activity_z, its historical percentile/regime, cross-ETF breadth, and up to 252
@@ -554,7 +564,9 @@ def attach_market_activity(conn, response: Dict[str, Any]) -> None:
     from api.services import options_flow_market_activity as activity
 
     try:
-        snapshot = activity.compute_market_activity_snapshot(conn)
+        snapshot = activity.compute_market_activity_snapshot(conn, as_of_date=as_of_date, include_live=True)
+        if snapshot and as_of_date and snapshot["asOfDate"] != as_of_date.isoformat():
+            snapshot = None
     except Exception as e:
         print("[options-flow] market activity computation failed: {}".format(e))
         snapshot = None
@@ -575,6 +587,7 @@ def attach_market_activity(conn, response: Dict[str, Any]) -> None:
         "history": snapshot["history"],
         "tickers": snapshot["tickers"],
         "research": research,
+        "elevatedSessionStreak": snapshot.get("elevatedSessionStreak"),
     }
     residual_by_ticker = {} if snapshot is None else snapshot["residualByTicker"]
     z_by_ticker = {} if snapshot is None else snapshot["zByTicker"]
@@ -608,9 +621,9 @@ def fetch_ticker(
     }
 
 
-def fetch_history(conn, ticker: str, days: int) -> Dict[str, Any]:
+def fetch_history(conn, ticker: str, days: int, session: Optional[date] = None) -> Dict[str, Any]:
     with conn.cursor() as cur:
-        cur.execute(HISTORY_SQL, {"ticker": ticker, "days": days, "heavy": HEAVY_KEYS})
+        cur.execute(HISTORY_SQL, {"ticker": ticker, "days": days, "heavy": HEAVY_KEYS, "session": session})
         rows = cur.fetchall()
     return assemble_history(rows, ticker)
 
