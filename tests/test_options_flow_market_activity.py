@@ -38,6 +38,7 @@ from api.services.options_flow_market_activity import (
     compute_market_activity_snapshot,
     historical_percentile,
     load_gross_premium_history,
+    load_v4_research_summary,
     market_activity_frame,
     rolling_zscore_20d,
 )
@@ -180,6 +181,16 @@ def test_attach_market_activity_wires_fields_when_snapshot_available(monkeypatch
     assert response["marketActivity"]["regime"] == "ELEVATED"
     assert response["tickers"][0]["residualActivity"] == -0.73
     assert response["tickers"][1]["activityZ"] == 2.0
+
+
+def test_load_v4_research_summary_reads_the_committed_report():
+    summary = load_v4_research_summary()
+    assert summary is not None, "reports/options-flow-market-factor-v4.json must be committed and readable"
+    assert summary["verdict"] == "MARKET ACTIVITY SIGNAL PROMISING BUT NOT YET VALIDATED"
+    assert summary["spyReturn10d"]["rho"] == pytest.approx(0.1846237072547214)
+    assert summary["spyVol10d"]["rho"] == pytest.approx(0.2069013483184676)
+    assert summary["vixChange10d"]["rho"] == pytest.approx(-0.2673752713440728)
+    assert summary["spyMaxDrawdown10d"]["pValue"] > 0.05  # the one outcome v4 found NOT significant
 
 
 def test_breadth_counts_above_normal():

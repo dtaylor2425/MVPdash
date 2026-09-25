@@ -559,6 +559,12 @@ def attach_market_activity(conn, response: Dict[str, Any]) -> None:
         print("[options-flow] market activity computation failed: {}".format(e))
         snapshot = None
 
+    try:
+        research = activity.load_v4_research_summary()
+    except Exception as e:
+        print("[options-flow] v4 research summary load failed: {}".format(e))
+        research = None
+
     response["marketActivity"] = None if snapshot is None else {
         "asOfDate": snapshot["asOfDate"],
         "value": snapshot["value"],
@@ -568,6 +574,7 @@ def attach_market_activity(conn, response: Dict[str, Any]) -> None:
         "breadth": snapshot["breadth"],
         "history": snapshot["history"],
         "tickers": snapshot["tickers"],
+        "research": research,
     }
     residual_by_ticker = {} if snapshot is None else snapshot["residualByTicker"]
     z_by_ticker = {} if snapshot is None else snapshot["zByTicker"]

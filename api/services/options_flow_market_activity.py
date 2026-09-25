@@ -23,13 +23,18 @@ the historical percentile distribution, not trading thresholds and not optimized
 
 from __future__ import annotations
 
+import json
 from datetime import date
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from api.services.options_flow_phase1_scope import PHASE1_TICKERS
+
+ROOT = Path(__file__).resolve().parents[2]
+V4_REPORT_PATH = ROOT / "reports" / "options-flow-market-factor-v4.json"
 
 # The exact 6-ticker universe Signal Research v1-v4 validated. Deliberately NOT derived from
 # OPTIONS_FLOW_UNIVERSE (which has 22 tickers across 6 groups) -- market_activity_z is defined,
@@ -156,6 +161,42 @@ def breadth(z_by_ticker: Dict[str, Optional[float]]) -> Dict[str, int]:
     valid = [v for v in z_by_ticker.values() if v is not None and not (isinstance(v, float) and np.isnan(v))]
     above = sum(1 for v in valid if v > 0)
     return {"aboveNormal": above, "total": len(valid), "tracked": len(z_by_ticker)}
+
+
+_V4_SUMMARY_CACHE: Dict[str, Any] = {}
+
+
+def load_v4_research_summary() -> Optional[Dict[str, Any]]:
+    """
+    The handful of numbers the page's "Historical Behavior" card quotes, read directly from the
+    committed Signal Research v4 report (reports/options-flow-market-factor-v4.json, commit
+    7629c93) -- never hand-copied into frontend code, so the copy can't silently drift from the
+    actual study. Cached in-process (the file never changes at runtime); returns None if the
+    report file isn't present in this deployment rather than raising.
+    """
+    if "data" in _V4_SUMMARY_CACHE:
+        return _V4_SUMMARY_CACHE["data"]
+    try:
+        raw = json.loads(V4_REPORT_PATH.read_text(encoding="utf-8"))
+        spy = raw["marketBattery"]["SPY"]
+
+        def _corr(outcome_key: str) -> Dict[str, Optional[float]]:
+            sp = spy.get(outcome_key, {}).get("spearman", {})
+            return {"rho": sp.get("rho"), "pValue": sp.get("pValue"), "n": sp.get("n")}
+
+        summary = {
+            "verdict": raw.get("verdict"),
+            "spyReturn5d": _corr("ret_5d"),
+            "spyReturn10d": _corr("ret_10d"),
+            "spyVol10d": _corr("fwd_vol_10d"),
+            "vixChange10d": _corr("vix_change_10d"),
+            "spyMaxDrawdown10d": _corr("fwd_max_drawdown_10d"),
+        }
+    except Exception as e:
+        print("[options-flow] could not load v4 research summary: {}".format(e))
+        summary = None
+    _V4_SUMMARY_CACHE["data"] = summary
+    return summary
 
 
 def compute_market_activity_snapshot(
