@@ -41,6 +41,7 @@ from api.services.options_flow_market_activity import (
     market_activity_frame,
     rolling_zscore_20d,
 )
+from api.services import options_flow_store as store
 
 
 def test_activity_tickers_matches_phase1_scope():
@@ -143,6 +144,42 @@ def test_activity_regime_bands():
     assert activity_regime(95.0) == "EXTREME"
     assert activity_regime(99.9) == "EXTREME"
     assert activity_regime(None) is None
+
+
+def test_attach_market_activity_never_raises_on_a_broken_connection():
+    """A conn that can't run the real query (e.g. the fake conns other store tests use) must
+    leave marketActivity: None and every ticker's residualActivity: None, never propagate the
+    exception into the /latest response."""
+    class _BrokenConn:
+        def cursor(self):
+            raise RuntimeError("no real Postgres here")
+
+    response = {"tickers": [{"ticker": "SPY"}, {"ticker": "QQQ"}]}
+    store.attach_market_activity(_BrokenConn(), response)
+    assert response["marketActivity"] is None
+    assert response["tickers"][0]["residualActivity"] is None
+    assert response["tickers"][0]["activityZ"] is None
+    assert response["tickers"][1]["residualActivity"] is None
+
+
+def test_attach_market_activity_wires_fields_when_snapshot_available(monkeypatch):
+    fake_snapshot = {
+        "asOfDate": "2026-09-21", "value": 1.23, "valueMean": 1.1, "percentile": 80.0,
+        "regime": "ELEVATED", "breadth": {"aboveNormal": 4, "total": 6, "tracked": 6},
+        "history": [{"date": "2026-09-21", "value": 1.23}],
+        "zByTicker": {"SPY": 0.5, "QQQ": 2.0}, "residualByTicker": {"SPY": -0.73, "QQQ": 0.77},
+        "tickers": ["SPY", "QQQ"],
+    }
+    import api.services.options_flow_market_activity as activity_module
+    monkeypatch.setattr(activity_module, "compute_market_activity_snapshot", lambda conn: fake_snapshot)
+
+    response = {"tickers": [{"ticker": "SPY"}, {"ticker": "QQQ"}]}
+    store.attach_market_activity(object(), response)
+
+    assert response["marketActivity"]["value"] == 1.23
+    assert response["marketActivity"]["regime"] == "ELEVATED"
+    assert response["tickers"][0]["residualActivity"] == -0.73
+    assert response["tickers"][1]["activityZ"] == 2.0
 
 
 def test_breadth_counts_above_normal():

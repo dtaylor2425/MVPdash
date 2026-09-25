@@ -534,7 +534,46 @@ def fetch_latest(conn, universe: Dict[str, List[str]], cfg: Dict[str, Any], now:
         rows = cur.fetchall()
         cur.execute(LATEST_RUN_SQL)
         run = cur.fetchone()
-    return assemble_latest(rows, run, universe, cfg, now)
+    out = assemble_latest(rows, run, universe, cfg, now)
+    attach_market_activity(conn, out)
+    return out
+
+
+def attach_market_activity(conn, response: Dict[str, Any]) -> None:
+    """
+    Mutates `response` in place: adds a top-level `marketActivity` block (current
+    market_activity_z, its historical percentile/regime, cross-ETF breadth, and up to 252
+    sessions of history for the chart) and a `residualActivity` field on every ticker entry
+    that's part of the tracked 6-ETF activity universe. Computed SERVER-SIDE, here, so the
+    browser only ever receives derived numbers -- see api/services/options_flow_market_activity.py,
+    the one canonical implementation.
+
+    Never raises: a failure here (e.g. no full_flow history yet) leaves `marketActivity: None`
+    and every ticker's `residualActivity: None` rather than breaking the whole /latest response.
+    """
+    from api.services import options_flow_market_activity as activity
+
+    try:
+        snapshot = activity.compute_market_activity_snapshot(conn)
+    except Exception as e:
+        print("[options-flow] market activity computation failed: {}".format(e))
+        snapshot = None
+
+    response["marketActivity"] = None if snapshot is None else {
+        "asOfDate": snapshot["asOfDate"],
+        "value": snapshot["value"],
+        "valueMean": snapshot["valueMean"],
+        "percentile": snapshot["percentile"],
+        "regime": snapshot["regime"],
+        "breadth": snapshot["breadth"],
+        "history": snapshot["history"],
+        "tickers": snapshot["tickers"],
+    }
+    residual_by_ticker = {} if snapshot is None else snapshot["residualByTicker"]
+    z_by_ticker = {} if snapshot is None else snapshot["zByTicker"]
+    for t in response.get("tickers", []):
+        t["residualActivity"] = residual_by_ticker.get(t.get("ticker"))
+        t["activityZ"] = z_by_ticker.get(t.get("ticker"))
 
 
 def fetch_ticker(
