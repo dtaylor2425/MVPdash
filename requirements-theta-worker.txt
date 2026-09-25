@@ -2,6 +2,16 @@
 # Deliberately NOT part of requirements.txt / the Python 3.11 API service:
 # `thetadata` requires Python >= 3.12.
 thetadata>=1.0.9
+# thetadata's own client.py does `from dotenv import load_dotenv` at module level but does NOT
+# declare python-dotenv in its own package metadata (Requires-Dist) -- an upstream packaging
+# bug. A fresh `pip install -r` (this Dockerfile's exact scenario) then fails on
+# `ModuleNotFoundError: No module named 'dotenv'` the moment `import thetadata` runs, even
+# though nothing here ever calls dotenv directly. Confirmed against thetadata==1.0.10's actual
+# METADATA (Requires-Dist: grpcio, httpx, pandas, polars, protobuf, zstandard -- no dotenv) and
+# its client.py (line 16: `from dotenv import load_dotenv`). Pin explicitly until upstream fixes
+# their own dependency list; do not remove this just because a local venv happens to already
+# have python-dotenv installed for an unrelated reason (that's exactly why this was missed).
+python-dotenv>=1.0.0
 psycopg[binary]>=3.2
 pandas>=2.3.2
 numpy>=1.26,<3
