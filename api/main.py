@@ -19,6 +19,7 @@ from api.routers.auth import router as auth_router
 from api.routers.admin import router as admin_router
 from api.routers.macro_thesis import router as macro_thesis_router, admin_router as macro_thesis_admin_router
 from api.routers.private_options_flow import router as private_options_flow_router
+from api.routers.research_usage import router as research_usage_router
 
 
 try:
@@ -62,6 +63,7 @@ app.include_router(admin_router)
 app.include_router(macro_thesis_router)
 app.include_router(macro_thesis_admin_router)
 app.include_router(private_options_flow_router)
+app.include_router(research_usage_router)
 if portfolio:  app.include_router(portfolio.router, prefix="/api")
 if screener:   app.include_router(screener.router,  prefix="/api")
 if playbook:   app.include_router(playbook.router,  prefix="/api")
