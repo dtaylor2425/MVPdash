@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
+import threading
+import time
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -18,10 +21,50 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from api.db import get_connection
+from api.services.portfolio_lock import try_acquire as _lock_try_acquire, release as _lock_release
 from src.portfolio_ledger import build_ledger
 from src.portfolio_market import load_market
 
 NY_TZ = ZoneInfo("America/New_York")
+
+# Normal runs (both strategies, sequentially) finish in a few minutes; this is a hard
+# wall-clock backstop, not a target. See _install_runtime_guard.
+DEFAULT_MAX_RUNTIME_SECONDS = 30 * 60
+
+# Set at the top of main(); used only to timestamp stage markers below.
+_START_MONOTONIC: Optional[float] = None
+
+
+def _stage(strategy: Optional[str], name: str) -> None:
+    """Structured, always-flushed progress marker. Orchestration/logging only -- this does not
+    affect what gets built or published. If a run ever hangs again, the last STAGE line printed
+    for a strategy is exactly where it stopped, instead of having to reconstruct it after the
+    fact from deployment timestamps."""
+    elapsed = (time.monotonic() - _START_MONOTONIC) if _START_MONOTONIC is not None else -1.0
+    tag = f"[{strategy}]" if strategy else "[job]"
+    print(f"{tag} STAGE {name} (+{elapsed:.1f}s)", flush=True)
+
+
+def _install_runtime_guard(max_seconds: int) -> threading.Timer:
+    """Hard ceiling on the whole process. If anything below -- a DB call, a stuck lock, a slow
+    upstream fetch -- ever blocks past this, force-exit rather than let a cron invocation sit
+    alive indefinitely (this is what let a single stuck run block every later trigger for
+    hours). Deliberately a plain daemon timer + os._exit, not signal.alarm, so this also works
+    for local/dry-run testing on platforms without SIGALRM."""
+
+    def _kill() -> None:
+        print(
+            f"FATAL: exceeded max runtime of {max_seconds}s; force-exiting so this cron "
+            "invocation cannot hang indefinitely. Check the STAGE lines above for the last "
+            "checkpoint reached.",
+            flush=True,
+        )
+        os._exit(1)
+
+    timer = threading.Timer(max_seconds, _kill)
+    timer.daemon = True
+    timer.start()
+    return timer
 
 STRATEGY_CONFIGS: Dict[str, Dict[str, Any]] = {
     "stock_alpha": {
@@ -488,13 +531,33 @@ def _publish_run(run_id: str) -> None:
         conn.commit()
 
 
-def _run_strategy(strategy: str, run_date: date, dry_run: bool) -> bool:
-    # A transaction-scoped lock spans build + publication, including separate
-    # writer connections, and is released automatically on crash/rollback.
-    with get_connection() as lock_conn:
-        with lock_conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("portfolio:" + strategy,))
+def _run_strategy(strategy: str, run_date: date, dry_run: bool) -> Optional[bool]:
+    """Returns True (published or already-unchanged), False (failed), or None (another
+    invocation already holds this strategy's lock right now -- skipped cleanly, not a failure).
+
+    The lock is a non-blocking, session-level advisory lock held on a DEDICATED connection
+    (never used for queries) for the whole build+publish span, spanning the separate writer
+    connections used below -- see api/services/portfolio_lock.py. This replaces the previous
+    pg_advisory_xact_lock(...), which BLOCKS until free: one wedged run used to hold that lock
+    for hours and every later cron trigger would then queue up behind it indefinitely instead of
+    exiting. try_acquire never waits -- a duplicate/overlapping invocation just skips."""
+    _stage(strategy, "lock:acquire")
+    lock_conn = get_connection()
+    try:
+        if not _lock_try_acquire(lock_conn, strategy):
+            print(
+                f"[{strategy}] Another invocation already holds this strategy's lock; "
+                "skipping cleanly instead of waiting.",
+                flush=True,
+            )
+            return None
+        _stage(strategy, "lock:acquired")
         return _run_strategy_locked(strategy, run_date, dry_run)
+    finally:
+        try:
+            _lock_release(lock_conn, strategy)
+        finally:
+            lock_conn.close()
 
 
 def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
@@ -509,9 +572,14 @@ def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
         raise ValueError("New decisions must use today's publication date; backdating is disabled")
     if not previous:
         raise ValueError("Published opening records required before ledger migration")
+    _stage(strategy, "publication_guards:start")
     _assert_publication_guards()
+    _stage(strategy, "publication_guards:done")
     previous_payload = previous["payload"] if previous else None
+    _stage(strategy, "build_strategy_payload:start")
     candidate = _json_sanitize(_build_strategy_payload(strategy))
+    _stage(strategy, "build_strategy_payload:done")
+    _stage(strategy, "macro_prices:start")
     from api.deps import get_regime, get_macro, get_prices
     if get_macro().empty or get_prices().empty:
         raise ValueError("Macro inputs unavailable; published allocation unchanged")
@@ -519,13 +587,18 @@ def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
     if (run_date - price_date).days > 7:
         raise ValueError("Macro market inputs are stale; published allocation unchanged")
     regime = get_regime()
+    _stage(strategy, "macro_prices:done")
     old_book = previous_payload.get("ledger") or {}
     symbols = {r["ticker"] for r in candidate.get("holdings", []) + previous_payload.get("holdings", [])}
     symbols.update(r["ticker"] for r in (old_book.get("pending") or {}).get("holdings", []))
     series = (previous_payload.get("performance") or {}).get("series") or []
     anchor = old_book.get("as_of") or (series[-1]["date"] if series else None)
+    _stage(strategy, "load_market:start")
     market = load_market(symbols, run_date, anchor)
+    _stage(strategy, "load_market:done")
+    _stage(strategy, "build_ledger:start")
     payload = _json_sanitize(build_ledger(candidate, previous, _load_published_history(strategy), market, run_date, regime.score))
+    _stage(strategy, "build_ledger:done")
     official = _official_rebalance_diff(previous_payload, payload, run_date)
     payload["official_rebalance"] = official
 
@@ -553,6 +626,7 @@ def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
         "strategy": strategy,
         "label": STRATEGY_CONFIGS[strategy]["label"],
     }
+    _stage(strategy, "db_insert_run:start")
     run_id = _insert_run(
         strategy,
         run_date,
@@ -564,6 +638,7 @@ def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
         payload,
         None,
     )
+    _stage(strategy, "db_insert_run:done")
 
     if not valid:
         reason = "; ".join(errors)
@@ -571,13 +646,20 @@ def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
         print(f"[{strategy}] FAILED guardrails: {reason}")
         return False
 
+    _stage(strategy, "db_store_child_rows:start")
     _store_child_rows(run_id, payload, official)
+    _stage(strategy, "db_store_child_rows:done")
+    _stage(strategy, "publish:start")
     _publish_run(run_id)
+    _stage(strategy, "publish:done")
     print(f"[{strategy}] Published {run_id}. Holdings={diagnostics['holding_count']} Turnover={official['turnover']:.2%}")
     return True
 
 
 def main() -> None:
+    global _START_MONOTONIC
+    _START_MONOTONIC = time.monotonic()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--strategy", choices=sorted(STRATEGY_CONFIGS.keys()))
     parser.add_argument("--all", action="store_true")
@@ -586,8 +668,20 @@ def main() -> None:
     parser.add_argument("--run-date")
     parser.add_argument("--scheduled-hour", type=int, choices=range(24),
                         help="Only run during this New York hour (omit for a manual catch-up)")
+    parser.add_argument("--max-runtime-seconds", type=int, default=DEFAULT_MAX_RUNTIME_SECONDS,
+                        help="Hard wall-clock ceiling for the whole job; force-exits past this "
+                             "so a hang can never keep a cron invocation alive indefinitely "
+                             f"(default: {DEFAULT_MAX_RUNTIME_SECONDS}s)")
     args = parser.parse_args()
 
+    guard = _install_runtime_guard(args.max_runtime_seconds)
+    try:
+        _run_main(args)
+    finally:
+        guard.cancel()
+
+
+def _run_main(args: argparse.Namespace) -> None:
     if args.scheduled_hour is not None and not _scheduled_hour_matches(_now_et(), args.scheduled_hour):
         print(f"Outside scheduled New York hour {args.scheduled_hour:02d}:00; skipping.")
         return
@@ -608,6 +702,10 @@ def main() -> None:
     for strategy in strategies:
         try:
             published = _run_strategy(strategy, run_date, args.dry_run)
+            if published is None:
+                # Another invocation already holds this strategy's lock right now (see
+                # api/services/portfolio_lock.py) -- that is not this run's failure.
+                continue
             if not published:
                 had_failure = True
         except Exception as exc:
