@@ -70,3 +70,29 @@ Both first ledger publications succeeded: Stock Alpha `7e535291-873e-4c80-8af0-8
 The Railway portfolio job uses cron `0 19,20 * * 1-5` with start command `python jobs/nightly_portfolio_refresh.py --all --scheduled-hour 15`. The New York timezone guard permits one daily run at 3 p.m. local time across daylight saving; the other UTC trigger exits before accessing the database. Market holidays are skipped. For a manual catch-up outside that hour, omit `--scheduled-hour`; do not backdate or bypass publication guards. New decisions retain the next-session opening reference convention; daily publication uses completed-session valuations.
 
 Source-data calibration verification beyond the portfolio dry-run remains separate follow-up work.
+
+
+## Daily publication timing (September 30 operational clarification)
+
+Railway portfolio-admin-job uses UTC cron `0 19,20 * * 1-5` and start command
+`python jobs/nightly_portfolio_refresh.py --all --scheduled-hour 15`. The New York
+hour guard selects 19:00 UTC in daylight time and 20:00 UTC in standard time.
+The other invocation exits without rebuilding. A single 19:00 UTC trigger stops
+publishing after the autumn clock change because it reaches the guard at 2 p.m.
+
+Publication is daily; routine allocation decisions remain weekly, with existing
+macro/exposure exceptions. Decisions use the next session opening model reference.
+The 3 p.m. job only books completed sessions, so a Monday decision's Tuesday-open
+reference appears in Wednesday's publication, with Tuesday as its execution date.
+Publication date, valuation date, pending decision date, and execution date must
+remain distinct in the page and logs. A successful zero-turnover run is valid.
+
+Confirmed production September 30 publication: f2e1d736-f34d-4569-9783-60343de6e51d,
+valuation through September 29, 15.4776% turnover, META added and NEM removed.
+The website previously fetched only on mount/manual refresh; a tab left open
+across the job could therefore keep showing the prior snapshot indefinitely.
+The frontend now checks every minute while visible and on return to the tab,
+retaining the last good published snapshot if a refresh fails.
+
+Do not rerun with replacement, backdate a decision, or modify published records
+to make the display look current. Same-day publication remains an immutable no-op.

@@ -531,6 +531,22 @@ def _publish_run(run_id: str) -> None:
         conn.commit()
 
 
+def _publication_summary(payload: Dict[str, Any], official: Dict[str, Any]) -> str:
+    """Distinguish a successful daily publication from an executed rebalance."""
+    pending = payload.get("pending_allocation") or {}
+    execution_dates = sorted({str(t["date"]) for t in payload.get("trade_queue", []) if t.get("date")})
+    parts = [f"Holdings={len(_positions_from_payload(payload))}",
+             f"Turnover={official.get('turnover', 0):.2%}",
+             f"Valuation through={payload.get('valuation_as_of') or 'unavailable'}",
+             f"Executed reference sessions={','.join(execution_dates) or 'none'}"]
+    if pending:
+        parts.append(f"Pending decision={pending.get('decision_date')}; next-session opening reference "
+                     f"not before={pending.get('execute_not_before')}; recorded after that session completes")
+    else:
+        parts.append("No pending allocation; daily valuation does not require a trade")
+    return ". ".join(parts)
+
+
 def _run_strategy(strategy: str, run_date: date, dry_run: bool) -> Optional[bool]:
     """Returns True (published or already-unchanged), False (failed), or None (another
     invocation already holds this strategy's lock right now -- skipped cleanly, not a failure).
@@ -652,7 +668,7 @@ def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
     _stage(strategy, "publish:start")
     _publish_run(run_id)
     _stage(strategy, "publish:done")
-    print(f"[{strategy}] Published {run_id}. Holdings={diagnostics['holding_count']} Turnover={official['turnover']:.2%}")
+    print(f"[{strategy}] Published {run_id}. {_publication_summary(payload, official)}", flush=True)
     return True
 
 
