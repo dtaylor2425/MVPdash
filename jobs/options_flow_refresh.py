@@ -99,6 +99,7 @@ _NULL_TIMER = _NullTimer()
 
 RETRYABLE_GRPC = {"UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED", "INTERNAL", "ABORTED"}
 RETRY_BACKOFF_SEC = (1.0, 3.0, 8.0)
+CONNECT_BACKOFF_SEC = (2.0, 5.0, 10.0)
 
 
 def log(msg: str) -> None:
@@ -149,7 +150,25 @@ class ThetaFetcher:
             ) from e
         # The client logs its auth response (account e-mail, subscription tiers) at INFO.
         logging.getLogger("thetadata").setLevel(logging.WARNING)
-        return ThetaClient(api_key=key, dataframe_type="pandas")
+        # ThetaClient authenticates over HTTP during construction, before _call's
+        # gRPC retry policy can apply. Retry only transient transport failures;
+        # credentials, entitlement errors, and programming errors fail immediately.
+        import httpx
+        for attempt in range(len(CONNECT_BACKOFF_SEC) + 1):
+            try:
+                client = ThetaClient(api_key=key, dataframe_type="pandas")
+                if attempt:
+                    log("ThetaData connection recovered on attempt {}.".format(attempt + 1))
+                return client
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+                if attempt == len(CONNECT_BACKOFF_SEC):
+                    raise RuntimeError("ThetaData startup connection failed after {} attempts ({})".format(
+                        attempt + 1, type(exc).__name__)) from exc
+                delay = CONNECT_BACKOFF_SEC[attempt]
+                # Do not print vendor response bodies, URLs, or authentication data.
+                log("ThetaData startup {} on attempt {}; retrying in {}s.".format(
+                    type(exc).__name__, attempt + 1, delay))
+                time.sleep(delay)
 
     @staticmethod
     def _load_no_data_exc():
