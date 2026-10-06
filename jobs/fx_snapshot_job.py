@@ -5,7 +5,7 @@ Ingest FRED + Frankfurter, score the 10 G10 currencies, derive 45 pairs, and
 publish one dated JSON snapshot. The API routes only read snapshots — they
 never call FRED or Frankfurter.
 
-Recommended Railway cron (weekly, after ECB fixing): 0 6 * * 1
+Recommended Railway cron (weekly, after ECB fixing): 0 18 * * 1
 
     python jobs/fx_snapshot_job.py                 # validate, build, publish
     python jobs/fx_snapshot_job.py --dry-run       # build + print, no writes

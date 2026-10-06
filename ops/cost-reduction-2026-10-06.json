@@ -1,0 +1,50 @@
+{
+  "purpose": "Recoverable cost reduction; no snapshots or database tables deleted.",
+  "macro_environment": "1d8e83ed-5df3-4ed5-b719-0e23b4ef0b33",
+  "changes": [
+    {
+      "service": "macro-thesis-job",
+      "serviceId": "b71f6401-7a96-48a2-9a68-ef95d3deac54",
+      "before": {
+        "cronSchedule": "0 7 * * *",
+        "startCommand": "python jobs/macro_thesis_job.py",
+        "watchPatterns": [],
+        "restartPolicyType": "NEVER"
+      },
+      "after": {
+        "cronSchedule": null,
+        "startCommand": "python -c \"print('The View is paused; see ops/cost-reduction-2026-10-06.json to restore')\"",
+        "watchPatterns": [
+          "/ops/restore-the-view.trigger"
+        ],
+        "restartPolicyType": "NEVER"
+      }
+    },
+    {
+      "service": "forex job",
+      "serviceId": "56eb472c-1962-41e7-bd26-5062b3ca40be",
+      "before": {
+        "cronSchedule": "0 6 * * 1-5"
+      },
+      "after": {
+        "cronSchedule": "0 18 * * 1"
+      }
+    },
+    {
+      "service": "score-refresh",
+      "serviceId": "ea698687-eac0-4e03-a399-2ac8a8d509fa",
+      "environmentId": "7264c1bc-781c-4968-a01b-e08bfc5c4fc3",
+      "before": {
+        "cronSchedule": "0 5 * * 2-6"
+      },
+      "after": {
+        "cronSchedule": "0 5 * * 6"
+      }
+    }
+  ],
+  "recovery": [
+    "Restore the archived frontend page from archive/the-view/page.js to src/app/dashboard/macro/page.js and restore navigation/report changes using Git.",
+    "Apply the before settings to the Railway service instances. Restore daily thesis schedule only after the page is ready.",
+    "The backend thesis publisher, API, models, database snapshots and credentials are retained."
+  ]
+}

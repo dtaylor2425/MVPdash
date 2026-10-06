@@ -20,6 +20,7 @@ import math
 import re
 import statistics
 import time
+from threading import RLock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -34,6 +35,8 @@ router = APIRouter(prefix="/api/stock-intelligence", tags=["stock-intelligence"]
 # In-memory cache. Railway instances may restart, so this is an acceleration
 # layer rather than durable storage.
 _CACHE: Dict[str, Tuple[float, Any]] = {}
+_CACHE_LOCK = RLock()
+MAX_CACHE_ENTRIES = 64
 
 SECTOR_ETFS = {
     "Technology": "XLK",
@@ -133,19 +136,31 @@ def _fallback_mover_candidates(limit: int) -> List[Tuple[str, str]]:
 
 
 
+def _prune_cache(now: float) -> None:
+    # Called with the lock held. Prune all expired entries, not just the requested key.
+    for key in list(_CACHE):
+        if _CACHE[key][0] <= now:
+            del _CACHE[key]
+
+
 def _cache_get(key: str) -> Any:
-    item = _CACHE.get(key)
-    if not item:
-        return None
-    expires_at, value = item
-    if time.time() >= expires_at:
-        _CACHE.pop(key, None)
-        return None
-    return value
+    with _CACHE_LOCK:
+        _prune_cache(time.time())
+        item = _CACHE.pop(key, None)
+        if item is None:
+            return None
+        _CACHE[key] = item  # Most recently used entries survive capacity eviction.
+        return item[1]
 
 
 def _cache_set(key: str, value: Any, ttl_seconds: int) -> Any:
-    _CACHE[key] = (time.time() + ttl_seconds, value)
+    with _CACHE_LOCK:
+        now = time.time()
+        _prune_cache(now)
+        _CACHE.pop(key, None)
+        _CACHE[key] = (now + ttl_seconds, value)
+        while len(_CACHE) > MAX_CACHE_ENTRIES:
+            del _CACHE[next(iter(_CACHE))]
     return value
 
 
