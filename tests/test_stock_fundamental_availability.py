@@ -41,6 +41,7 @@ def test_five_quarters_explains_missing_acceleration():
     assert not result["availability"]["revenue_acceleration"]["available"]
     assert result["availability"]["revenue_acceleration"]["reason"]
     assert result["availability"]["score"]["available"]
+    assert "growth evidence" in result["label"]
 
 
 def test_six_quarters_can_supply_acceleration():

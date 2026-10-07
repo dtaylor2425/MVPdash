@@ -1422,6 +1422,9 @@ def _fundamental_velocity(ticker: Any) -> Dict[str, Any]:
 
     if score is None:
         label = "Unavailable"
+    elif revenue_acceleration is None and eps_acceleration is None:
+        # Growth levels can be scored even when acceleration cannot be measured.
+        label = "Strong growth evidence" if score >= 65 else "Mixed growth evidence" if score >= 45 else "Weak growth evidence"
     elif score >= 80:
         label = "Rapidly Accelerating"
     elif score >= 65:
