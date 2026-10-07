@@ -1,0 +1,11 @@
+{
+  "workerServiceId": "b3650ccf-4898-4378-b5d0-9d001793b28f",
+  "environmentId": "1d8e83ed-5df3-4ed5-b719-0e23b4ef0b33",
+  "startCommand": "python jobs/market_data_refresh.py",
+  "previousStartCommand": "python jobs/options_flow_refresh.py",
+  "cronSchedule": "45 21,22 * * 1-5",
+  "migration": "sql/012_theta_stock_snapshots.sql",
+  "coverage": "Published holdings + top 20 ranking rows + liquid watchlist; maximum 60 symbols",
+  "collection": "After 17:30 Eastern use same-day EOD report; earlier attempt uses previous completed session. Options and stocks run serially and share the vendor-session lock.",
+  "rollback": "Restore previousStartCommand to stop stock collection; stored data and all published portfolio records are independent."
+}

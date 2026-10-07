@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile.theta-worker"
   },
   "deploy": {
-    "startCommand": "python jobs/options_flow_refresh.py",
+    "startCommand": "python jobs/market_data_refresh.py",
     "cronSchedule": "45 21,22 * * 1-5",
     "restartPolicyType": "NEVER"
   }

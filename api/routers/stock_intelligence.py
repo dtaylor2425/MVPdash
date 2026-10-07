@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query
+from api.services.stock_research_score import build_research_score
 
 router = APIRouter(prefix="/api/stock-intelligence", tags=["stock-intelligence"])
 
@@ -2644,6 +2645,7 @@ def _full_stock_payload(symbol: str) -> Dict[str, Any]:
         },
         "price_history": _price_series(history.iloc[-260:]),
         "stock_intelligence_score": score,
+        "research_score": build_research_score(info),
         "why_it_matters": why,
         "financial_model": model,
         "fundamental_velocity": velocity,
