@@ -5,6 +5,9 @@ from psycopg.types.json import Jsonb
 from api.db import get_connection
 
 TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+# Used when an existing published holding has an Unknown sector. Verified from
+# the company workbook; diversified ETFs deliberately have no sector proxy.
+SECTOR_FALLBACKS = {'NET': 'XLK'}
 DDL = Path(__file__).resolve().parents[2] / "sql" / "012_theta_stock_snapshots.sql"
 
 def ensure_schema():

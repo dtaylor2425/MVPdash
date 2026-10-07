@@ -2,6 +2,55 @@ from datetime import date, timedelta
 import pytest
 from api.services.stock_participation import build_participation_payload
 from api.services.stock_research_score import build_research_score
+from api.services.stock_participation import enrich_price_bars, session_anatomy
+
+
+def test_moving_averages_have_real_warmup_and_no_future_input():
+    data = bars(280)
+    result = enrich_price_bars(data)
+    assert result[48]['sma50'] is None
+    assert result[49]['sma50'] == 125.5
+    assert result[198]['sma200'] is None
+    assert result[199]['sma200'] == 200.5
+    data[-1]['close'] = 99999
+    assert enrich_price_bars(data)[199]['sma200'] == result[199]['sma200']
+    assert enrich_price_bars(data)[-1]['sma200'] is None
+
+
+def test_session_activity_respects_early_close_and_missing_volume():
+    # Friday after Thanksgiving closes at 13:00 ET, not 16:00.
+    data = [dict(timestamp='2026-11-27T'+t, open=100, high=102, low=99, close=101, volume=v)
+            for t,v in [('09:30:00',100),('10:00:00',200),('12:30:00',300)]]
+    out = session_anatomy(data, '2026-11-27')
+    assert out['regular_volume'] == 600
+    assert out['opening_30m_volume_share_pct'] == pytest.approx(100/6)
+    assert out['closing_30m_volume_share_pct'] == 50
+    assert out['intraday_range_pct'] == 3
+    assert out['regular_dollar_turnover_estimate'] == pytest.approx(60400)
+    data[1]['volume'] = None
+    assert session_anatomy(data, '2026-11-27')['regular_volume'] is None
+
+
+def test_old_snapshot_enrichment_preserves_stored_score_and_inputs(monkeypatch):
+    import copy
+    from datetime import datetime, timezone
+    from fastapi import Response
+    from api.routers.stock_participation import stock_participation
+    from api.services import theta_stock_store as store
+    daily = bars(280)
+    payload = build_participation_payload('NET', daily, [], daily)
+    payload.pop('analytics_view_version')
+    payload['bars'] = daily[-260:]
+    saved = copy.deepcopy(payload)
+    monkeypatch.setattr(store, 'latest', lambda symbol: dict(payload=payload,daily_bars=daily,
+        market_date=date.fromisoformat(daily[-1]['date']),updated_at=datetime.now(timezone.utc)))
+    monkeypatch.setattr(store, 'load_daily_cache', lambda symbol: dict(daily_bars=daily))
+    result = stock_participation('NET', Response())
+    assert result['sector_symbol'] == 'XLK'
+    assert result['metrics']['relative_strength_sector_20d_pct'] == 0
+    assert result['bars'][-1]['sma200'] is not None
+    assert result['score'] == saved['score']
+    assert payload == saved
 
 
 def bars(n=70):

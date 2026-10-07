@@ -1053,6 +1053,7 @@ def _build_financial_model(ticker: Any) -> Dict[str, Any]:
             annual_balance,
             column,
         )
+        record["period_end"] = pd.Timestamp(column).date().isoformat()
         annual_records.append(record)
 
     ttm_record: Dict[str, Any] = {"label": "TTM"}
@@ -1138,7 +1139,9 @@ def _build_financial_model(ticker: Any) -> Dict[str, Any]:
         records.append(ttm_record)
 
     for index, record in enumerate(records):
-        previous = records[index - 1] if index > 0 else None
+        previous = records[index - 1] if index > 0 and record["label"] != "TTM" else None
+        if previous and not 350 <= (pd.Timestamp(record["period_end"]) - pd.Timestamp(previous["period_end"])).days <= 380:
+            previous = None
         record["revenue_growth"] = (
             _safe_growth(
                 record.get("revenue"),
@@ -1179,6 +1182,20 @@ def _build_financial_model(ticker: Any) -> Dict[str, Any]:
     ]
 
     return {
+        "availability": {
+            record["label"]: {
+                key: {"available": False, "reason": (
+                    "Comparable prior-year trailing twelve-month data is unavailable."
+                    if record["label"] == "TTM" and key in {"revenue_growth", "eps_growth"}
+                    else "Comparable values from consecutive fiscal years are unavailable."
+                    if key in {"revenue_growth", "eps_growth"}
+                    else "The provider did not supply complete comparable quarterly inputs."
+                    if record["label"] == "TTM"
+                    else "The provider did not supply this field or the inputs needed to calculate it."
+                )}
+                for key, _, _ in rows if record.get(key) is None
+            } for record in records
+        },
         "periods": [record["label"] for record in records],
         "records": [
             {
@@ -1198,6 +1215,16 @@ def _build_financial_model(ticker: Any) -> Dict[str, Any]:
     }
 
 
+def _quarter_value(frame, aliases, column):
+    value = _statement_lookup(frame, aliases, column)
+    if value is None and list(aliases) == STATEMENT_ALIASES["free_cash_flow"]:
+        operating = _statement_lookup(frame, STATEMENT_ALIASES["operating_cash_flow"], column)
+        capex = _statement_lookup(frame, STATEMENT_ALIASES["capex"], column)
+        if operating is not None and capex is not None:
+            value = operating - abs(capex)
+    return value
+
+
 def _quarterly_series(
     frame: pd.DataFrame,
     aliases: Iterable[str],
@@ -1207,34 +1234,37 @@ def _quarterly_series(
     return [
         {
             "date": pd.Timestamp(column).date().isoformat(),
-            "value": _statement_lookup(frame, aliases, column),
+            "value": _quarter_value(frame, aliases, column),
         }
         for column in columns
     ]
 
 
+def _prior_year_item(values, item):
+    """Match fiscal dates, including 52/53-week years; never positional gaps."""
+    date = pd.Timestamp(item["date"])
+    candidates = [v for v in values if 350 <= (date - pd.Timestamp(v["date"])).days <= 380]
+    return min(candidates, key=lambda v: abs((date-pd.Timestamp(v["date"])).days-365)) if candidates else None
+
+
 def _yoy_series(values: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    output: List[Dict[str, Any]] = []
-
-    for index, item in enumerate(values):
-        prior_index = index - 4
-        growth = (
-            _safe_growth(
-                item.get("value"),
-                values[prior_index].get("value"),
-            )
-            if prior_index >= 0
-            else None
-        )
-        output.append(
-            {
-                "date": item["date"],
-                "value": _clean_scalar(item.get("value")),
-                "yoy_growth": _clean_scalar(growth),
-            }
-        )
-
+    output = []
+    for item in values:
+        prior = _prior_year_item(values, item)
+        growth = _safe_growth(item.get("value"), prior.get("value")) if prior else None
+        output.append({"date": item["date"], "value": _clean_scalar(item.get("value")),
+                       "yoy_growth": _clean_scalar(growth)})
     return output
+
+
+def _latest_acceleration(series):
+    if len(series) < 2:
+        return None
+    previous, latest = series[-2:]
+    gap = (pd.Timestamp(latest["date"]) - pd.Timestamp(previous["date"])).days
+    if not 70 <= gap <= 110 or latest.get("yoy_growth") is None or previous.get("yoy_growth") is None:
+        return None
+    return latest["yoy_growth"] - previous["yoy_growth"]
 
 
 def _fundamental_velocity(ticker: Any) -> Dict[str, Any]:
@@ -1285,29 +1315,10 @@ def _fundamental_velocity(ticker: Any) -> Dict[str, Any]:
         )
     )
 
-    revenue_acceleration = None
-    revenue_growth_points = [
-        item["yoy_growth"]
-        for item in revenue
-        if item.get("yoy_growth") is not None
-    ]
-    if len(revenue_growth_points) >= 2:
-        revenue_acceleration = (
-            revenue_growth_points[-1]
-            - revenue_growth_points[-2]
-        )
-
-    eps_acceleration = None
-    eps_growth_points = [
-        item["yoy_growth"]
-        for item in eps
-        if item.get("yoy_growth") is not None
-    ]
-    if len(eps_growth_points) >= 2:
-        eps_acceleration = (
-            eps_growth_points[-1]
-            - eps_growth_points[-2]
-        )
+    revenue_acceleration = _latest_acceleration(revenue)
+    eps_acceleration = _latest_acceleration(eps)
+    revenue_growth_points = [revenue[-1]["yoy_growth"]] if revenue and revenue[-1].get("yoy_growth") is not None else []
+    eps_growth_points = [eps[-1]["yoy_growth"]] if eps and eps[-1].get("yoy_growth") is not None else []
 
     gross_margin_series: List[Dict[str, Any]] = []
     revenue_values = _quarterly_series(
@@ -1333,11 +1344,11 @@ def _fundamental_velocity(ticker: Any) -> Dict[str, Any]:
         )
 
     margin_expansion = None
-    if len(gross_margin_series) >= 5:
-        latest = gross_margin_series[-1].get("value")
-        prior_year = gross_margin_series[-5].get("value")
-        if latest is not None and prior_year is not None:
-            margin_expansion = latest - prior_year
+    if gross_margin_series:
+        latest_margin = gross_margin_series[-1]
+        prior_margin = _prior_year_item(gross_margin_series, latest_margin)
+        if prior_margin and latest_margin.get("value") is not None and prior_margin.get("value") is not None:
+            margin_expansion = latest_margin["value"] - prior_margin["value"]
 
     components: List[Tuple[float, float]] = []
 
@@ -1389,11 +1400,7 @@ def _fundamental_velocity(ticker: Any) -> Dict[str, Any]:
             )
         )
 
-    fcf_growth_points = [
-        item["yoy_growth"]
-        for item in fcf
-        if item.get("yoy_growth") is not None
-    ]
+    fcf_growth_points = [fcf[-1]["yoy_growth"]] if fcf and fcf[-1].get("yoy_growth") is not None else []
     if fcf_growth_points:
         components.append(
             (
@@ -1411,9 +1418,11 @@ def _fundamental_velocity(ticker: Any) -> Dict[str, Any]:
         weight_sum = sum(weight for _, weight in components)
         score = round(total / weight_sum, 1)
     else:
-        score = 50.0
+        score = None
 
-    if score >= 80:
+    if score is None:
+        label = "Unavailable"
+    elif score >= 80:
         label = "Rapidly Accelerating"
     elif score >= 65:
         label = "Accelerating"
@@ -1427,6 +1436,29 @@ def _fundamental_velocity(ticker: Any) -> Dict[str, Any]:
     return {
         "score": score,
         "label": label,
+        "availability": {
+            "revenue_acceleration": {"available": revenue_acceleration is not None,
+                "reason": None if revenue_acceleration is not None else "Two consecutive quarterly YoY growth rates are required; the provider did not supply comparable values.",
+                "valid_quarters": sum(x.get("value") is not None for x in revenue)},
+            "eps_acceleration": {"available": eps_acceleration is not None,
+                "reason": None if eps_acceleration is not None else "Two consecutive quarterly YoY growth rates are required; the provider did not supply comparable values.",
+                "valid_quarters": sum(x.get("value") is not None for x in eps)},
+            "gross_margin_expansion": {
+                "available": margin_expansion is not None,
+                "reason": None if margin_expansion is not None else "Comparable gross profit and revenue for the latest quarter and prior-year quarter are unavailable.",
+            },
+            "series": {
+                key: {
+                    "available": bool(values and values[-1].get("value") is not None),
+                    "reason": None if values and values[-1].get("value") is not None else "The provider did not supply the latest quarterly value or its required inputs.",
+                    "growth_available": bool(values and values[-1].get("yoy_growth") is not None),
+                    "growth_reason": None if values and values[-1].get("yoy_growth") is not None else "Comparable latest and prior-year quarterly values are unavailable.",
+                }
+                for key, values in {"revenue": revenue, "gross_profit": gross_profit,
+                    "operating_income": operating_income, "eps": eps, "free_cash_flow": fcf}.items()
+            },
+            "score": {"available": bool(components), "reason": None if components else "Comparable quarterly fundamentals are unavailable."},
+        },
         "revenue_acceleration": _pct(revenue_acceleration, 1),
         "eps_acceleration": _pct(eps_acceleration, 1),
         "gross_margin_expansion": _pct(margin_expansion, 1),

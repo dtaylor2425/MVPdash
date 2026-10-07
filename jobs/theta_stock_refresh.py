@@ -28,6 +28,7 @@ SECTORS = {'Technology':'XLK','Financial Services':'XLF','Financials':'XLF',
 WATCHLIST = 'AAPL MSFT NVDA AMZN GOOGL META TSLA AVGO AMD NFLX PLTR JPM XOM LLY NEM TSM ASML ANET SHOP'.split()
 SECTOR_HINTS = dict.fromkeys('AAPL MSFT NVDA AVGO AMD PLTR TSM ASML ANET SHOP'.split(),'XLK')
 SECTOR_HINTS.update({'AMZN':'XLY','TSLA':'XLY','GOOGL':'XLC','META':'XLC','NFLX':'XLC','JPM':'XLF','XOM':'XLE','LLY':'XLV','NEM':'XLB'})
+SECTOR_HINTS.update(store.SECTOR_FALLBACKS)
 FEED = {'provider':'ThetaData','daily_feed':'national_eod','intraday_feed':'utp_cta',
  'adjustment':'unadjusted','session':'completed','intraday_interval':'5m','daily_report_time':'17:15 America/New_York',
  'coverage_note':'National EOD reports are generated at 17:15 ET and can include post-market trades. Intraday bars cover the regular session only (consolidated UTP/CTA). Unadjusted prices, not total returns; no Nasdaq Basic volume is mixed into comparisons.'}

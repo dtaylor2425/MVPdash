@@ -7,7 +7,65 @@ from __future__ import annotations
 
 import math
 import statistics
+from datetime import date, timedelta
 from typing import Any
+from api.services.options_flow_calendar import NY, session_bounds
+
+
+def enrich_price_bars(bars):
+    """Trailing means use only observations at/before each date, before display slicing."""
+    result = []
+    for index, bar in enumerate(bars):
+        row = dict(bar)
+        for length in (50, 200):
+            window = bars[max(0, index-length+1):index+1]
+            clean = len(window) == length and not any(
+                abs(b['close']/a['close']-1) > .45 for a,b in zip(window, window[1:]))
+            row['sma'+str(length)] = rounded(statistics.mean(b['close'] for b in window)) if clean else None
+        result.append(row)
+    return result
+
+
+def session_anatomy(intraday, market_date):
+    """Observed regular-session activity; no classification of investor intent."""
+    metrics = dict(regular_volume=None, regular_dollar_turnover_estimate=None,
+        opening_30m_volume_share_pct=None, closing_30m_volume_share_pct=None,
+        intraday_range_pct=None, open_to_close_return_pct=None)
+    if not intraday:
+        return metrics
+    opening, closing = intraday[0]['open'], intraday[-1]['close']
+    metrics['intraday_range_pct'] = (max(r['high'] for r in intraday)-min(r['low'] for r in intraday))/opening*100
+    metrics['open_to_close_return_pct'] = (closing/opening-1)*100
+    if any(r['volume'] is None for r in intraday):
+        return metrics
+    volume = sum(r['volume'] for r in intraday)
+    metrics['regular_volume'] = volume
+    metrics['regular_dollar_turnover_estimate'] = sum((r['high']+r['low']+r['close'])/3*r['volume'] for r in intraday)
+    bounds = session_bounds(date.fromisoformat(market_date))
+    if volume > 0 and bounds:
+        open_end = (bounds[0].astimezone(NY)+timedelta(minutes=30)).strftime('%H:%M')
+        close_start = (bounds[1].astimezone(NY)-timedelta(minutes=30)).strftime('%H:%M')
+        metrics['opening_30m_volume_share_pct'] = sum(r['volume'] for r in intraday if r['timestamp'][11:16] < open_end)/volume*100
+        metrics['closing_30m_volume_share_pct'] = sum(r['volume'] for r in intraday if r['timestamp'][11:16] >= close_start)/volume*100
+    return metrics
+
+
+def metric_availability(metrics, sector_symbol=None):
+    reasons = {
+        'relative_volume': 'Requires a reported session volume and 20 prior positive-volume sessions.',
+        'relative_strength_spy_20d_pct': 'Requires matching stock and SPY dates across 20 sessions and a usable unadjusted price history.',
+        'relative_strength_sector_20d_pct': ('A matching 20-session sector history is unavailable.' if sector_symbol else 'No single-sector benchmark is assigned to this security.'),
+        'gap_pct': 'Requires current and previous regular-session bars; an after-hours report close is not substituted.',
+        'gap_retained_pct': ('The opening gap is smaller than 0.1%; a retention percentage would be unstable.' if metrics.get('gap_pct') is not None and abs(metrics['gap_pct']) < .1 else 'Requires current and previous regular-session bars and a meaningful opening gap.'),
+        'close_location_pct': 'Requires a non-flat regular-session trading range.',
+        'above_vwap_pct': 'Requires regular-session price and positive-volume bars.',
+        'realized_volatility_20d_pct': 'Requires 21 daily closes without a large price discontinuity.',
+        'sma50': 'Requires 50 completed price observations without a large price discontinuity.',
+        'sma200': 'Requires 200 completed price observations without a large price discontinuity.',
+    }
+    return {key: {'available': value is not None,
+                  'reason': None if value is not None else reasons.get(key, 'The required regular-session observations are unavailable.')}
+            for key, value in metrics.items()}
 
 
 def finite(value):
@@ -118,10 +176,14 @@ def build_participation_payload(symbol, daily_bars, intraday_bars, benchmark_bar
         relative_strength_sector_20d_pct=sector_excess,close_location_pct=close_location,gap_pct=gap,
         gap_retained_pct=gap_retained,above_vwap_pct=above_vwap,realized_volatility_20d_pct=realized,
         sma20=sma20,sma50=sma50,drawdown_63d_pct=drawdown)
-    return {"ticker":symbol,"as_of":now["date"],"source":"ThetaData","feed":feed_metadata or {},
+    enriched_bars = enrich_price_bars(bars)
+    metrics['sma200'] = enriched_bars[-1]['sma200']
+    metrics.update(session_anatomy(intraday, now['date']))
+    return {"ticker":symbol,"as_of":now["date"],"source":"ThetaData","feed":feed_metadata or {},"analytics_view_version":2,
         "coverage_note":f"{len(bars)} daily EOD reports (17:15 ET, may include after-hours); {len(intraday)} regular-session intraday bars. Unadjusted prices, not total returns.",
-        "bars":bars[-260:],"intraday":intraday,"sector_symbol":sector_symbol,
+        "bars":enriched_bars[-260:],"intraday":intraday,"sector_symbol":sector_symbol,
         "metrics":{k:rounded(v) for k,v in metrics.items()},
+        "availability":metric_availability(metrics, sector_symbol),
         "score":{"total":rounded(total),"coverage_pct":coverage,"components":components,"version":"participation-v1","label":label},
         "observations":observations,"methodology":[
             "Participation score is a fixed descriptive rubric, not a probability, forecast, or portfolio allocation signal.",
@@ -129,4 +191,6 @@ def build_participation_payload(symbol, daily_bars, intraday_bars, benchmark_bar
             "Relative volume excludes the current session from its 20-session median baseline. No partial-session/full-day comparison is used.",
             "Gap and closing-strength metrics use regular-session bars only; daily return and relative volume use national EOD reports, which can include after-hours trades.",
             "Intraday VWAP is an approximation from bar typical price weighted by bar volume, not tick-level execution VWAP.",
+            "50- and 200-session moving averages are trailing curves, requiring a complete observation window; they are withheld across large unadjusted price discontinuities.",
+            "Session activity uses observed regular-session five-minute bars. Turnover is estimated from typical price times volume. Opening/closing volume shares cover 30 minutes at each end of the exchange session, including early closes; they do not indicate net buying or selling.",
             "Relative returns use matching session dates and price returns, not dividend-reinvested returns. Corporate actions can affect raw histories."]}
