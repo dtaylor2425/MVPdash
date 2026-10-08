@@ -7,6 +7,7 @@ boards never serve it. Python 3.12+ using the existing Theta worker environment.
 from __future__ import annotations
 import argparse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time as day_time, timedelta, timezone
 import os
 from pathlib import Path
@@ -64,6 +65,27 @@ def configuration():
       'windows':['next_session','7d','30d'],'noGreeks':True}
     return config
 
+def collect_expirations(fetch, symbol, day, expirations, budget):
+    """At most two requests in flight; never return a partially collected ticker.
+
+    Check the soft budget before each submission. The request counter can race
+    with one other submission (at most one extra initial call); vendor retries
+    and already-running requests can additionally exceed time/request budgets.
+    Drain the current batch on failure before another ticker starts.
+    """
+    contracts=[]
+    with ThreadPoolExecutor(max_workers=2,thread_name_prefix='scanner-expiry') as pool:
+        for start in range(0,len(expirations),2):
+            pending=[]
+            for expiry in expirations[start:start+2]:
+                budget()
+                print('{} requesting trade/quote expiry {}'.format(symbol,expiry),flush=True)
+                pending.append((expiry,pool.submit(fetch.trade_quote,symbol,expiry,day)))
+            # Stable expiration order regardless of network completion order.
+            for expiry,future in pending:
+                contracts.append({'expiration':expiry,'trades':future.result()})
+    return contracts
+
 def run(args,fetcher=None):
     from api.services.options_flow_scanner import build_scanner_snapshot
     started=time.monotonic()
@@ -76,7 +98,7 @@ def run(args,fetcher=None):
     max_seconds=max(1,float(os.getenv('OPTIONS_SCANNER_MAX_SECONDS','1800')))
     max_requests=max(1,int(os.getenv('OPTIONS_SCANNER_MAX_REQUESTS','1000')))
     metadata={'config':config,'benchmark':bool(args.tickers),'universeDate':universe_date,
-      'maxSeconds':max_seconds,'maxRequests':max_requests,'noSilentUniverseCap':True}
+      'maxSeconds':max_seconds,'maxRequests':max_requests,'noSilentUniverseCap':True,'expiryConcurrency':2}
     lock=None
     run_id=None
     fetch=fetcher
@@ -100,7 +122,7 @@ def run(args,fetcher=None):
             print('Scanner already complete for this session, profile, and universe.',flush=True)
             return 0
         bounds=session_bounds(day)
-        cfg={'thetaConcurrency':1,'strikeRange':config['strikeRange'],
+        cfg={'thetaConcurrency':2,'strikeRange':config['strikeRange'],
           'sessionStart':'09:30:00','sessionEnd':bounds[1].astimezone(NY).strftime('%H:%M:%S')}
         fetch=fetch or ThetaFetcher(cfg)
         fetch.point_in_time=True
@@ -128,11 +150,7 @@ def run(args,fetcher=None):
                 print('{} requesting dated expirations for {}'.format(symbol,day),flush=True)
                 expirations=fetch.expirations(symbol,day,30)
                 expirations=sorted(set(e for e in expirations if next_day<=e<=day+timedelta(days=30)))
-                contracts=[]
-                for expiry in expirations:
-                    budget()
-                    print('{} requesting trade/quote expiry {}'.format(symbol,expiry),flush=True)
-                    contracts.append({'expiration':expiry,'trades':fetch.trade_quote(symbol,expiry,day)})
+                contracts=collect_expirations(fetch,symbol,day,expirations,budget)
                 history=[] if args.dry_run else store.history(symbol,profile,day)
                 payload=build_scanner_snapshot(symbol,day,contracts,next_session=next_day,
                   completed=True,condition_allowlist=config['conditionAllowlist'],history=history,profile_identity=profile)

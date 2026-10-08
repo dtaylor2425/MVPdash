@@ -27,9 +27,10 @@ the default board or historical baseline. Failure never replaces a completed row
 Use the existing `theta-options-worker`, start command `python jobs/market_data_refresh.py`.
 Set `OPTIONS_SCANNER_ENABLED=true`, `OPTIONS_SCANNER_MAX_SECONDS=900` and
 `OPTIONS_SCANNER_MAX_REQUESTS=400`. Keep the existing DST-safe cron. The wrapper runs
-the scanner after existing options and stock collectors, serially. Completed reruns
+the scanner after existing options and stock collectors, serially. Within a ticker,
+at most two expiration requests run concurrently. Completed reruns
 make no Theta requests. Runtime/request limits are checked between vendor calls;
-an in-flight call can exceed the time budget. No new always-on service is needed.
+in-flight calls and vendor retries can exceed the soft budgets. No new always-on service is needed.
 
 Disable by setting `OPTIONS_SCANNER_ENABLED=false`; stored history remains recoverable.
 Manual benchmark: `python jobs/options_scanner_refresh.py --tickers NVDA,ANET,AEHR --dry-run`.

@@ -82,3 +82,53 @@ def test_failed_force_refresh_never_overwrites_completed_publication():
 def test_default_condition_policy_includes_verified_auto_execution():
     with patch.dict('os.environ',{},clear=True):
         assert worker.configuration()['conditionAllowlist']==['0','18','95']
+
+
+def test_expiry_collection_has_two_inflight_and_stable_order():
+    import threading
+    from datetime import timedelta
+    barrier=threading.Barrier(2)
+    lock=threading.Lock()
+    active=0
+    peak=0
+    class ConcurrentFetcher:
+        def trade_quote(self,symbol,expiry,day):
+            nonlocal active,peak
+            with lock:
+                active+=1
+                peak=max(peak,active)
+            barrier.wait(timeout=3)
+            with lock:
+                active-=1
+            return pd.DataFrame()
+    days=[date(2026,10,8)+timedelta(days=i) for i in range(4)]
+    result=worker.collect_expirations(ConcurrentFetcher(),'AAPL',date(2026,10,7),days,lambda:None)
+    assert peak==2
+    assert [r['expiration'] for r in result]==days
+
+def test_partial_batch_failure_never_reaches_analytics_publication():
+    fetch=Fetcher()
+    fetch.expirations=lambda *a:[date(2026,10,8),date(2026,10,9)]
+    def trade(symbol,expiry,day):
+        if expiry==date(2026,10,9):
+            raise RuntimeError('network')
+        return pd.DataFrame()
+    fetch.trade_quote=trade
+    a=args();a.tickers='AAPL'
+    with patch.dict('os.environ',{'DATABASE_URL':'','POSTGRES_URL':''}),patch.object(worker,'ready_date',return_value=date(2026,10,7)), \
+      patch('api.services.options_flow_scanner.build_scanner_snapshot') as analytics:
+        assert worker.run(a,fetch)==2
+    analytics.assert_not_called()
+
+def test_runtime_budget_checked_before_every_submission():
+    import pytest
+    fetch=Fetcher()
+    checks=0
+    def budget():
+        nonlocal checks
+        checks+=1
+        if checks==2:
+            raise worker.BudgetReached()
+    with pytest.raises(worker.BudgetReached):
+        worker.collect_expirations(fetch,'AAPL',date(2026,10,7),[date(2026,10,8),date(2026,10,9)],budget)
+    assert fetch.requested==[date(2026,10,8)]
