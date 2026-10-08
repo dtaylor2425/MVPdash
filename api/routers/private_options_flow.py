@@ -85,6 +85,38 @@ def _is_missing_table(e: Exception) -> bool:
     return e.__class__.__name__ == "UndefinedTable"
 
 
+@router.get("/scanner")
+def scanner(window: str = Query(default="7d", pattern="^(next_session|7d|30d)$"),
+            session: Optional[date] = Query(default=None)) -> Dict[str, Any]:
+    from api.services import options_scanner_store
+    from api.services.options_flow_scanner import rank_scanner
+    try:
+        board = options_scanner_store.latest_board(session=session)
+        if board is None:
+            return {"status": "not_published", "window": window, "rows": [], "shortlist": [],
+                    "marketDate": None, "coverage": None, "run": None}
+        out = rank_scanner(board["symbols"], window=window)
+        # Only matching-session stock observations confirm this session's flow.
+        with get_connection() as conn:
+            stock_rows = conn.execute("""SELECT ticker,market_date,payload FROM theta_stock_snapshots
+                WHERE market_date=%s AND ticker=ANY(%s)""",
+                (board["run"]["market_date"], board["completed"])).fetchall()
+        stocks = {r["ticker"]: {"marketDate": str(r["market_date"]),
+                  "metrics": r["payload"].get("metrics", {})} for r in stock_rows}
+        for row in out["rows"]:
+            row["stockConfirmation"] = stocks.get(row["ticker"])
+        out.update(run=board["run"], coverage=board["coverage"],
+                   marketDate=board["run"]["market_date"],
+                   completedTickers=board["completed"], pendingTickers=board["pending"],
+                   failedTickers=board["failed"], excludedTickers=board["excluded"])
+        return out
+    except Exception as exc:
+        if _is_missing_table(exc):
+            return {"status": "not_published", "window": window, "rows": [], "shortlist": [],
+                    "marketDate": None, "coverage": None, "run": None}
+        raise _db_unavailable(exc)
+
+
 @router.get("/latest")
 def latest(session: Optional[date] = Query(default=None)) -> Dict[str, Any]:
     universe, cfg = load_universe(), load_config()

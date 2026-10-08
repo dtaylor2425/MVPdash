@@ -13,6 +13,6 @@ RUN pip install -r requirements-theta-worker.txt
 COPY api/__init__.py api/db.py api/
 COPY api/services/ api/services/
 COPY sql/ sql/
-COPY jobs/options_flow_refresh.py jobs/options_flow_backfill.py jobs/theta_stock_refresh.py jobs/market_data_refresh.py jobs/
+COPY jobs/options_flow_refresh.py jobs/options_flow_backfill.py jobs/theta_stock_refresh.py jobs/options_scanner_refresh.py jobs/market_data_refresh.py jobs/
 
 CMD ["python", "jobs/market_data_refresh.py"]
