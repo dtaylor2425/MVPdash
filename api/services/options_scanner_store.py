@@ -14,10 +14,11 @@ def ensure_schema():
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:24]
 
-def published_universe():
+def published_universe(on_or_before=None):
     with get_connection() as conn:
         row=conn.execute("""SELECT run_date,payload FROM stock_intelligence_runs WHERE is_published AND status='published'
-          ORDER BY run_date DESC,as_of_timestamp DESC LIMIT 1""").fetchone()
+          AND (%s::date IS NULL OR run_date<=%s::date)
+          ORDER BY run_date DESC,as_of_timestamp DESC LIMIT 1""",(on_or_before,on_or_before)).fetchone()
     if not row:
         raise RuntimeError('No published stock-ranking universe')
     rows=row['payload'].get('rows') or row['payload'].get('rankings') or []

@@ -9,7 +9,9 @@ expirations, not predicted orders or returns. No portfolio history is changed.
 `jobs/options_scanner_refresh.py` uses the existing Theta subscription and shared
 advisory lock. It collects regular-session trade/quote records for future expiries
 through 30 calendar days, including exchange holidays and early closes. The scan
-becomes eligible at 17:30 America/New_York. Same-day expired contracts are excluded.
+becomes eligible at 17:30 America/New_York. Earlier scheduled slots and non-trading
+days exit before collection. Explicit historical runs use ranking membership dated
+on or before the requested session. Same-day expired contracts are excluded.
 
 The default strike range is 25 strikes on either side of spot plus an ATM strike
 when available; it is a bounded sample, not the full chain. Greek arrays and open
@@ -50,8 +52,13 @@ excluded activity inspectable.
 
 Unusualness is descriptive gross premium versus 20 prior consecutive completed
 exchange sessions with the same profile and window. Until then it is unavailable.
-It is not a forecast probability. Content drafts retain dates, coverage and caveats;
-copying does not publish anything to Substack.
+It is not a forecast probability. The strict shortlist requires at least 50%
+directional attribution coverage. Manual editorial observations may have lower
+coverage, but require completed collection, positive consistent totals and at least
+25 classifiable trades. Drafts quantify the classified portion and excluded premium;
+this minimum is not statistical confidence. Copying does not publish to Substack.
+Contract detail responses show the top 20 by net bullish premium and disclose the
+full contract count. All aggregate totals still use the complete collected sample.
 
 The private endpoint `/api/private/options-flow/scanner` retains internal-token
 authentication; the frontend proxy also checks the existing user allowlist. No

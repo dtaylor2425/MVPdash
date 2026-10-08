@@ -45,13 +45,13 @@ def next_session(day):
         result+=timedelta(days=1)
     return result
 
-def selection(tickers=None):
+def selection(tickers=None, on_or_before=None):
     if tickers:
         symbols=list(dict.fromkeys(s.strip().upper() for s in tickers.split(',') if s.strip()))
         if not symbols or any(not SYMBOL.fullmatch(s) for s in symbols):
             raise ValueError('Invalid benchmark ticker list')
         return symbols,None
-    symbols,asof=store.published_universe()
+    symbols,asof=store.published_universe(on_or_before)
     if not symbols:
         raise RuntimeError('Published stock ranking universe is empty')
     return symbols,asof
@@ -89,16 +89,20 @@ def collect_expirations(fetch, symbol, day, expirations, budget):
 def run(args,fetcher=None):
     from api.services.options_flow_scanner import build_scanner_snapshot
     started=time.monotonic()
+    now=datetime.now(timezone.utc).astimezone(NY)
+    if not args.date and (not is_trading_day(now.date()) or now.time()<day_time(17,30)):
+        print('Scanner scheduled slot skipped: waiting for a trading session after 17:30 Eastern.',flush=True)
+        return 0
     day=date.fromisoformat(args.date) if args.date else ready_date()
     if day>ready_date() or not is_trading_day(day):
         raise ValueError('Scanner date must be a completed EOD-ready session')
-    symbols,universe_date=selection(args.tickers)
+    symbols,universe_date=selection(args.tickers,on_or_before=day)
     config=configuration()
     profile=store.fingerprint(config)
     max_seconds=max(1,float(os.getenv('OPTIONS_SCANNER_MAX_SECONDS','1800')))
     max_requests=max(1,int(os.getenv('OPTIONS_SCANNER_MAX_REQUESTS','1000')))
     metadata={'config':config,'benchmark':bool(args.tickers),'universeDate':universe_date,
-      'maxSeconds':max_seconds,'maxRequests':max_requests,'noSilentUniverseCap':True,'expiryConcurrency':2}
+      'universeSelection':'latest published ranking on or before market date','maxSeconds':max_seconds,'maxRequests':max_requests,'noSilentUniverseCap':True,'expiryConcurrency':2}
     lock=None
     run_id=None
     fetch=fetcher

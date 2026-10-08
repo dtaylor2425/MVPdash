@@ -132,3 +132,20 @@ def test_runtime_budget_checked_before_every_submission():
     with pytest.raises(worker.BudgetReached):
         worker.collect_expirations(fetch,'AAPL',date(2026,10,7),[date(2026,10,8),date(2026,10,9)],budget)
     assert fetch.requested==[date(2026,10,8)]
+
+
+def test_scheduled_early_slot_skips_before_universe_or_vendor_access():
+    from datetime import datetime,timezone
+    a=args();a.date=None
+    clock=MagicMock()
+    clock.now.return_value=datetime(2026,12,7,21,45,tzinfo=timezone.utc)
+    with patch.object(worker,'datetime',clock),patch.object(worker,'selection') as universe,patch.object(worker,'get_connection') as db,patch.object(worker,'ThetaFetcher') as client:
+        assert worker.run(a)==0
+    universe.assert_not_called()
+    db.assert_not_called()
+    client.assert_not_called()
+
+def test_historical_universe_is_selected_on_or_before_session():
+    with patch.object(worker.store,'published_universe',return_value=(['AAPL'],'2026-10-05')) as published:
+        assert worker.selection(on_or_before=date(2026,10,5))[0]==['AAPL']
+    published.assert_called_once_with(date(2026,10,5))
