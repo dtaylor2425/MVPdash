@@ -44,3 +44,23 @@ def test_scanner_exposes_partial_coverage_without_inventing_rows():
         assert out['failedTickers'] == ['NVDA']
         assert out['coverage']['pending'] == 2
         assert str(read.call_args.kwargs['session']) == '2026-10-07'
+
+
+def test_contract_detail_is_bounded_without_changing_premium_totals():
+    row = {'ticker': 'AAPL', 'status': 'ok', 'completed': True, 'netBullishPremium': 12345,
+           'contracts': [{'strike': i} for i in range(100)]}
+    board = {'run': {'market_date': '2026-10-07'},
+             'symbols': [{'marketDate': '2026-10-07', 'windows': {'7d': row}}],
+             'coverage': {'total': 1, 'completed': 1}, 'completed': ['AAPL'],
+             'pending': [], 'failed': [], 'excluded': []}
+    connection = MagicMock()
+    connection.__enter__.return_value.execute.return_value.fetchall.return_value = []
+    with patch.dict('os.environ', {'INTERNAL_OPTIONS_API_SECRET': 'test-secret'}), \
+         patch('api.services.options_scanner_store.latest_board', return_value=board), \
+         patch('api.routers.private_options_flow.get_connection', return_value=connection):
+        out = client().get('/api/private/options-flow/scanner',
+                           headers={'X-Internal-Options-Token': 'test-secret'}).json()
+    assert len(out['rows'][0]['contracts']) == 20
+    assert out['rows'][0]['contractCount'] == 100
+    assert out['rows'][0]['netBullishPremium'] == 12345
+    assert len(out['shortlist'][0]['contracts']) == 20

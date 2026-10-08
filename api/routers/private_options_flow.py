@@ -105,6 +105,10 @@ def scanner(window: str = Query(default="7d", pattern="^(next_session|7d|30d)$")
                   "metrics": r["payload"].get("metrics", {})} for r in stock_rows}
         for row in out["rows"]:
             row["stockConfirmation"] = stocks.get(row["ticker"])
+            contracts = row.get("contracts", [])
+            row["contractCount"] = len(contracts)
+            row["contracts"] = contracts[:20]
+            row["contractLimit"] = 20
         out.update(run=board["run"], coverage=board["coverage"],
                    marketDate=board["run"]["market_date"],
                    completedTickers=board["completed"], pendingTickers=board["pending"],
