@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from copy import deepcopy
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from api.auth_deps import optional_account
 from api.db import get_connection
 from src.portfolio_ledger import first_entries, number
+from src.portfolio_health import publication_health
 
 router = APIRouter(prefix="/api/portfolio-snapshots", tags=["portfolio-snapshots"])
 VALID_STRATEGIES = {"stock_alpha", "smid_growth", "etf_macro"}
@@ -141,7 +142,11 @@ def _entry_references(row, payload):
 def get_latest_portfolio_snapshot(
     strategy: str = Query(default="stock_alpha"),
     user: Optional[Dict[str, Any]] = Depends(optional_account),
+    response: Response = None,
 ) -> Dict[str, Any]:
+    if response is not None:
+        response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        response.headers["Vary"] = "Cookie"
     strategy = _validate_strategy(strategy)
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -166,6 +171,7 @@ def get_latest_portfolio_snapshot(
             detail=f"No published snapshot for {strategy}. Run jobs/nightly_portfolio_refresh.py first.",
         )
     payload = _entry_references(row, _row_to_payload(row, _official_rebalance_log(strategy, through=row["published_at"])))
+    payload["publication_health"] = publication_health(payload)
     if user is None:
         return _truncate_for_anon(payload)
     payload["truncated"] = False

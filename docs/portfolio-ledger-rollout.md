@@ -96,3 +96,37 @@ retaining the last good published snapshot if a refresh fails.
 
 Do not rerun with replacement, backdate a decision, or modify published records
 to make the display look current. Same-day publication remains an immutable no-op.
+
+
+## October 14: daily decision policy v2
+
+Incident diagnosis: publications and valuations ran every trading day. The v1
+ledger only queued targets weekly (or at <65% exposure / >=5 percentage point
+macro change). Displayed stop levels did not cause execution. Published records
+show TSM below its stop on October 9 and multiple SMID stop breaches before the
+October 14 rotation. No historical returns or trades are altered by this fix.
+
+The scheduled builder now opts into `daily-v2`. Completed-session closes below
+an existing published stop, or three consecutive closes below a falling EMA21,
+queue full risk exits independently of the weekly boundary. Protective stop
+levels persist through routine trims/adds and adjust for splits. Risk exits
+block re-entry for five completed benchmark sessions.
+
+Ordinary allocation differences use a 1 percentage point deadband, 2 percentage
+points per stock per decision, and a 10% one-way turnover budget. SPY balances
+the macro 65–95% long requirement. Safety exits and enforcing concentration or
+exposure limits override ordinary pacing; these are not guaranteed stop fills
+or a guarantee of better returns. Parameters are operational defaults, not
+backtest-optimized. A stop can gap. The budget applies to target allocations,
+not exact realized turnover after next-session price moves.
+
+Existing pending decisions are immutable and execute before another decision
+is queued. Decisions still use the next session opening reference, recorded
+only after the full session is available. Same-day reruns preserve today's
+publication; v2 begins with the next new publication. Do not backdate or replace
+an existing snapshot to claim this policy was active earlier.
+
+The latest API reports NYSE-calendar publication/valuation health with a 15:30
+New York deadline (3 p.m. job plus grace). It forbids cache storage. The pages
+show publication/valuation dates, distinct trailing-year and YTD compounded
+returns, and gated-history messages rather than false 'no trades' claims.

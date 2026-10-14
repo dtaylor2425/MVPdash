@@ -8,6 +8,7 @@ from copy import deepcopy
 from datetime import date, timedelta
 import math
 import statistics
+from src.portfolio_decisions import daily_targets
 
 VERSION = "published-ledger-v1"
 
@@ -203,6 +204,8 @@ def build_ledger(candidate, previous, published, market, run_date, macro_score):
                 split = number(bar.get("split"), 0)
                 if split > 0 and split != 1:
                     position["quantity"] *= split
+                    if number(position.get("stop_level"), 0) > 0:
+                        position["stop_level"] /= split
                     if number(position.get("entry_price"), 0) > 0:
                         position.setdefault("original_entry_price", position["entry_price"])
                         position["entry_price"] /= split
@@ -227,7 +230,8 @@ def build_ledger(candidate, previous, published, market, run_date, macro_score):
                         trade = {"date": day, "ticker": ticker, "action": "Buy" if delta > 0 else "Sell",
                                        "quantity": abs(delta), "price": bar["open"], "decision_date": pending["decision_date"],
                                        "weight_traded": abs(delta) * bar["open"] / opening_nav,
-                                       "price_basis": "Next-session opening model reference"}
+                                       "price_basis": "Next-session opening model reference",
+                                       "decision_reason": pending.get("decision_review", {}).get("risk_exits", {}).get(ticker) or pending.get("decision_review", {}).get("reason") }
                         if delta < 0:
                             entry_price = number((prior or {}).get("entry_price"), 0)
                             trade.update({"exit_type": "Full exit" if quantity <= 0 else "Trim",
@@ -264,13 +268,30 @@ def build_ledger(candidate, previous, published, market, run_date, macro_score):
     completed_market = {t: [b for b in bars if b["date"] < run_day] for t, bars in market.items()}
     target_rows, exposure = target_holdings(candidate, completed_market, macro_score)
     old_target = number(old.get("target_stock_exposure"), exposure)
-    last_decision = book.get("last_decision_date")
-    week_changed = not last_decision or date.fromisoformat(last_decision).isocalendar()[:2] != date.fromisoformat(run_day).isocalendar()[:2]
     invested = 1-book["cash"]/nav
-    if book.get("pending") is None and (week_changed or invested < .65 or abs(exposure-old_target) >= .05):
-        book["pending"] = {"decision_date": run_day, "execute_not_before": (date.fromisoformat(run_day)+timedelta(days=1)).isoformat(),
-                           "holdings": target_rows, "macro_score": macro_score, "target_stock_exposure": exposure}
-        book["last_decision_date"] = run_day
+    review = {"status": "pending", "reason": "Previously published decision awaits its eligible completed session", "risk_exits": {}}
+    if book.get("pending") is None:
+        # Enable prospective daily policy only when explicitly supplied by the
+        # production candidate. Historical accounting fixtures retain v1 behavior.
+        if (candidate.get("risk_rules") or {}).get("decision_policy") == "daily-v2":
+            cooldowns = book.setdefault("risk_cooldowns", {})
+            cooldowns = {ticker: day for ticker, day in cooldowns.items() if len([s for s in sessions if s > day]) < 5}
+            book["risk_cooldowns"] = cooldowns
+            target_rows, review = daily_targets(holdings, target_rows, exposure, completed_market, candidate.get("risk_rules") or {}, cooldowns)
+            for ticker in review.get("risk_exits", {}):
+                cooldowns[ticker] = book["as_of"]
+            review["reentry_cooldown_sessions"] = 5
+            should_queue = target_rows is not None
+        else:
+            last_decision = book.get("last_decision_date")
+            week_changed = not last_decision or date.fromisoformat(last_decision).isocalendar()[:2] != date.fromisoformat(run_day).isocalendar()[:2]
+            should_queue = week_changed or invested < .65 or abs(exposure-old_target) >= .05
+        if should_queue:
+            book["pending"] = {"decision_date": run_day, "execute_not_before": (date.fromisoformat(run_day)+timedelta(days=1)).isoformat(),
+                               "holdings": target_rows, "macro_score": macro_score, "target_stock_exposure": exposure,
+                               "decision_review": review}
+            book["last_decision_date"] = run_day
+    out["decision_review"] = review
     if book.get("pending"):
         exposure = book["pending"]["target_stock_exposure"]
     else:
@@ -308,5 +329,6 @@ def build_ledger(candidate, previous, published, market, run_date, macro_score):
     )
     out.setdefault("methodology", {}).update({"volume": "Prior 20-session relative volume: strong >=1.5x, weak <0.8x; price direction is a buying/selling-pressure proxy, not observed order flow. Allocation multipliers 1.15/0.65/0.85/0.95 respectively.",
         "macro_allocation": "65% at scores <=25, rising linearly to 95% at >=75. Broad-market SPY fills capacity left by individual-stock caps.",
+        "daily_review": "Daily completed-session risk review: exit a published stop breach or three closes below falling EMA21. Routine adjustments use a 1 percentage point deadband, 2 points per stock and 10% one-way budget; SPY balances exposure. Safety exits and concentration/exposure limits override pacing. Risk exits block re-entry for five completed sessions. Published pending decisions execute unchanged before another decision is queued.",
         "entry": "First published entry reference for the current holding period; adds/trims do not reset it. Price change since entry is not a money-weighted position return."})
     return out

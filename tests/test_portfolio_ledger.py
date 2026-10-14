@@ -194,3 +194,32 @@ def test_split_adjusted_exit_does_not_report_false_loss():
     exit = next(t for t in result["trade_queue"] if t["ticker"] == "AAA")
     assert exit["entry_price"] == 50
     assert exit["exit_return_pct"] == 0
+
+
+def test_daily_policy_queues_stop_exit_midweek_without_rewriting_history():
+    c,previous,market=fixture()
+    first=build_ledger(c,previous,[previous],market,"2026-09-21",50)
+    first["ledger"]["pending"]=None
+    first["ledger"]["last_decision_date"]="2026-09-21"
+    first["ledger"]["positions"]["AAA"]["stop_level"]=95
+    first["target_stock_exposure"]=.8
+    c["risk_rules"]["decision_policy"]="daily-v2"
+    market["AAA"][1].update(open=90,close=90)
+    before=deepcopy(first)
+    result=build_ledger(c,{"payload":first},[previous],market,"2026-09-22",50)
+    assert first==before
+    assert result["performance"]["series"][:len(first["performance"]["series"])]==first["performance"]["series"]
+    pending=result["pending_allocation"]
+    assert pending["decision_review"]["risk_exits"]["AAA"]
+    assert pending["execute_not_before"]=="2026-09-23"
+    assert "AAA" not in [r["ticker"] for r in pending["holdings"]]
+    assert result["trade_queue"]==[]
+    assert result["holdings"][0]["entry_price"]==100
+
+    market["AAA"].append(bar("2026-09-23",89))
+    market["SPY"].append(bar("2026-09-23",400))
+    after=build_ledger(c,{"payload":result},[previous],market,"2026-09-24",50)
+    assert "AAA" not in [r["ticker"] for r in after["holdings"]]
+    assert after["pending_allocation"] is None
+    assert after["trade_queue"][0]["exit_return_pct"] == pytest.approx(-11)
+    assert after["performance"]["series"][:len(result["performance"]["series"])] == result["performance"]["series"]

@@ -309,7 +309,11 @@ def _validate_payload(
     positions = _positions_from_payload(payload)
     series = _performance_series_from_payload(payload)
 
-    if len(positions) < int(cfg["min_holdings"]):
+    executed_risk = ((previous_payload or {}).get("pending_allocation") or {}).get("decision_review", {}).get("risk_exits", {})
+    justified_risk_count = bool(payload.get("ledger")) and ((bool(executed_risk) and len(positions) >= max(1, len(_positions_from_payload(previous_payload or {})) - len(executed_risk))) or (bool((previous_payload or {}).get("risk_reduced_holdings")) and len(positions) >= len(_positions_from_payload(previous_payload or {}))))
+    if justified_risk_count and len(positions) < int(cfg["min_holdings"]):
+        payload["risk_reduced_holdings"] = True
+    if len(positions) < int(cfg["min_holdings"]) and not justified_risk_count:
         errors.append(f"Too few holdings: {len(positions)} < {cfg['min_holdings']}")
     if not series or len(series) < 40:
         errors.append(f"Performance series missing or too short: {len(series)} rows")
@@ -594,6 +598,7 @@ def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
     previous_payload = previous["payload"] if previous else None
     _stage(strategy, "build_strategy_payload:start")
     candidate = _json_sanitize(_build_strategy_payload(strategy))
+    candidate.setdefault("risk_rules", {}).update({"decision_policy": "daily-v2", "rebalance": "Daily completed-session risk review and gradual target adjustments."})
     _stage(strategy, "build_strategy_payload:done")
     _stage(strategy, "macro_prices:start")
     from api.deps import get_regime, get_macro, get_prices
