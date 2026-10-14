@@ -339,9 +339,17 @@ def _validate_payload(
     if previous_payload:
         turnover = float(official_rebalance.get("turnover") or 0.0)
         ticker_change_ratio = float(official_rebalance.get("ticker_change_ratio") or 0.0)
-        if turnover > float(cfg["max_turnover"]):
+        # A documented protective exit plus its SPY funding leg must not be
+        # blocked by a guard intended to catch unexplained strategy churn.
+        risk_sells = [t for t in payload.get("trade_queue", []) if t.get("action") == "Sell" and t.get("ticker") in executed_risk]
+        risk_weight = sum(float(t.get("weight_traded", 0)) for t in risk_sells)
+        unexplained_turnover = max(0, turnover-risk_weight)
+        exited = set(official_rebalance.get("sells") or []) & set(executed_risk)
+        union = {p["ticker"] for p in positions} | {p["ticker"] for p in _positions_from_payload(previous_payload)}
+        unexplained_change = max(0, ticker_change_ratio-len(exited)/max(1,len(union)))
+        if unexplained_turnover > float(cfg["max_turnover"]):
             errors.append(f"Turnover guardrail tripped: {turnover:.2%}")
-        if ticker_change_ratio > float(cfg["max_ticker_change_ratio"]):
+        if unexplained_change > float(cfg["max_ticker_change_ratio"]):
             errors.append(f"Ticker-change guardrail tripped: {ticker_change_ratio:.2%}")
 
     return len(errors) == 0, errors
