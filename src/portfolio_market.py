@@ -56,6 +56,12 @@ def load_market(tickers, run_date, anchor=None):
         bars = historical_share_bars(data, end)
         if not bars:
             raise ValueError(f"No completed market bars for {ticker}")
+        today = data.loc[[stamp.date() == end for stamp in data.index]].dropna(subset=["Close"])
+        if not today.empty:
+            last=today.iloc[-1]
+            bars[-1]["next_actions"]={"split":float(last.get("Stock Splits",0) or 0),"dividend":float(last.get("Dividends",0) or 0)}
+            if any(not math.isfinite(v) or v < 0 for v in bars[-1]["next_actions"].values()):
+                raise ValueError(f"Invalid current corporate actions for {ticker}")
         result[ticker] = bars
     import pandas_market_calendars as mcal
     schedule = mcal.get_calendar("NYSE").schedule(start_date=start, end_date=end-timedelta(days=1))

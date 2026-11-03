@@ -24,6 +24,7 @@ from api.db import get_connection
 from api.services.portfolio_lock import try_acquire as _lock_try_acquire, release as _lock_release
 from src.portfolio_ledger import build_ledger
 from src.portfolio_market import load_market
+from src.portfolio_execution import load_job_quotes
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -309,7 +310,7 @@ def _validate_payload(
     positions = _positions_from_payload(payload)
     series = _performance_series_from_payload(payload)
 
-    executed_risk = ((previous_payload or {}).get("pending_allocation") or {}).get("decision_review", {}).get("risk_exits", {})
+    executed_risk = (payload.get("decision_review", {}).get("risk_exits", {}) if payload.get("execution_policy") == "job-quote-v1" else ((previous_payload or {}).get("pending_allocation") or {}).get("decision_review", {}).get("risk_exits", {}))
     justified_risk_count = bool(payload.get("ledger")) and ((bool(executed_risk) and len(positions) >= max(1, len(_positions_from_payload(previous_payload or {})) - len(executed_risk))) or (bool((previous_payload or {}).get("risk_reduced_holdings")) and len(positions) >= len(_positions_from_payload(previous_payload or {}))))
     if justified_risk_count and len(positions) < int(cfg["min_holdings"]):
         payload["risk_reduced_holdings"] = True
@@ -606,7 +607,7 @@ def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
     previous_payload = previous["payload"] if previous else None
     _stage(strategy, "build_strategy_payload:start")
     candidate = _json_sanitize(_build_strategy_payload(strategy))
-    candidate.setdefault("risk_rules", {}).update({"decision_policy": "daily-v2", "rebalance": "Daily completed-session risk review and gradual target adjustments."})
+    candidate.setdefault("risk_rules", {}).update({"decision_policy": "job-execution-v3", "min_position_weight": .01, "rebalance": "Risk review and model executions in the same job publication.", "hard_sell": ["Published stop breached", "Three completed closes below falling EMA21", "Composite below 60", "Technical below 45", "Trend break", "No longer eligible"]})
     _stage(strategy, "build_strategy_payload:done")
     _stage(strategy, "macro_prices:start")
     from api.deps import get_regime, get_macro, get_prices
@@ -625,6 +626,11 @@ def _run_strategy_locked(strategy: str, run_date: date, dry_run: bool) -> bool:
     _stage(strategy, "load_market:start")
     market = load_market(symbols, run_date, anchor)
     _stage(strategy, "load_market:done")
+    quotes = load_job_quotes(symbols)
+    for ticker, quote in quotes.items():
+        # Corporate actions come from the daily action feed, never inferred from a price gap.
+        quote.update(market[ticker][-1].get("next_actions", {}))
+        market[ticker].append(quote)
     _stage(strategy, "build_ledger:start")
     payload = _json_sanitize(build_ledger(candidate, previous, _load_published_history(strategy), market, run_date, regime.score))
     _stage(strategy, "build_ledger:done")

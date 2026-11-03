@@ -2,7 +2,7 @@
 from copy import deepcopy
 
 
-def daily_targets(current, desired, exposure, market, rules, blocked=()):
+def daily_targets(current, desired, exposure, market, rules, blocked=(), evidence=None):
     """Exit breached published stops; stage ordinary rotation toward today's targets.
 
     Routine changes: 1 percentage point deadband, 2 points/name/decision and
@@ -22,10 +22,11 @@ def daily_targets(current, desired, exposure, market, rules, blocked=()):
             raise ValueError(f"Daily risk data missing for {ticker}")
         close = bars[-1]["close"]
         stop = row.get("stop_level")
-        closes = [bar.get("signal_close", bar["close"]) for bar in bars]
+        closes = [bar.get("signal_close", bar["close"]) for bar in bars if not bar.get("intraday")]
         reason = None
-        if stop is not None and close < float(stop):
-            reason = "Completed close below published stop"
+        completed = [b for b in bars if not b.get("intraday")]
+        if stop is not None and (close < float(stop) or (completed and completed[-1]["close"] < float(stop))):
+            reason = "Published stop breached" if bars[-1].get("intraday") else "Completed close below published stop"
         elif len(closes) >= 23:
             ema = closes[0]
             values = []
@@ -34,18 +35,31 @@ def daily_targets(current, desired, exposure, market, rules, blocked=()):
                 values.append(ema)
             if all(closes[i] < values[i] for i in (-1,-2,-3)) and values[-1] < values[-2]:
                 reason = "Three closes below falling EMA21"
+        if evidence is not None and not reason:
+            fresh = evidence.get(ticker)
+            if fresh is None:
+                reason = "No longer in the eligible model selection"
+            elif fresh.get("stock_intelligence_score", fresh.get("confluence_score", 100)) < 60:
+                reason = "Composite score below 60"
+            elif fresh.get("technical_score", 100) < 45:
+                reason = "Technical score below 45"
+            elif fresh.get("risk_state") == "Trend break":
+                reason = "Trend break risk state"
+        if not reason and 0 < row["current_weight"] < rules.get("min_position_weight", 0):
+            reason = "Below minimum position size"
         if reason:
             risk[ticker] = reason
             target.pop(ticker, None)
     weights = {t: r["current_weight"] for t,r in old.items()}
     desired_weights = {t:r["target_weight"] for t,r in target.items()}
     desired_weights["SPY"] = max(0, exposure-sum(w for t,w in desired_weights.items() if t != "SPY"))
+    cleanup = any(t != "SPY" and 0 < w < rules.get("min_position_weight", 0) for t,w in weights.items())
     significant = any(abs(desired_weights.get(t,0)-weights.get(t,0)) >= .01 for t in set(weights)|set(target))
     exposure_gap = exposure-sum(weights.values())
-    if not risk and not significant and abs(exposure_gap) < .01 and .65 <= sum(weights.values()) <= .95:
+    if not risk and not cleanup and not significant and abs(exposure_gap) < .01 and .65 <= sum(weights.values()) <= .95:
         return None, {"status":"hold", "reason":"All target differences below 1 percentage point; no completed-session risk trigger", "risk_exits":{}}
     # Move non-risk positions together toward their desired allocations, preserving
-    # relative changes while limiting turnover. Never use today's partial bar.
+    # relative changes while limiting turnover. EMA signals use completed bars; execution quotes may be intraday.
     delta = {t: desired_weights.get(t,0)-weights.get(t,0) for t in set(weights)|set(target) if t != "SPY" and t not in risk}
     largest = max([abs(v) for v in delta.values()] or [0])
     scale = min(1, .02/largest) if largest else 1
@@ -58,6 +72,8 @@ def daily_targets(current, desired, exposure, market, rules, blocked=()):
         if ticker == "SPY" or ticker in risk:
             continue
         weight = max(0, weights.get(ticker,0)+delta.get(ticker,0)*scale)
+        if weight < rules.get("min_position_weight", 0):
+            continue
         if weight <= 1e-8:
             continue
         row = deepcopy(target.get(ticker) or old[ticker])
@@ -76,10 +92,13 @@ def daily_targets(current, desired, exposure, market, rules, blocked=()):
             total=sum(r["target_weight"] for r in group)
             if total > limit:
                 for row in group: row["target_weight"] *= limit/total
+    result = {t: r for t,r in result.items() if r["target_weight"] >= rules.get("min_position_weight", 0)}
     total=sum(r["target_weight"] for r in result.values())
     if total > exposure:
         for row in result.values(): row["target_weight"] *= exposure/total
         total=exposure
+    result = {t:r for t,r in result.items() if r["target_weight"] >= rules.get("min_position_weight",0)}
+    total=sum(r["target_weight"] for r in result.values())
     reserve=exposure-total
     if reserve > 1e-8:
         row=deepcopy(target.get("SPY") or old.get("SPY") or {"ticker":"SPY","name":"S&P 500 long-exposure sleeve","sector":"Diversified ETF","theme":"Macro long-exposure reserve"})

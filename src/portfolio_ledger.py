@@ -149,7 +149,8 @@ def _views(book):
 def build_ledger(candidate, previous, published, market, run_date, macro_score):
     """Build a new publication from stored state, never from rebuilt performance."""
     run_day = str(run_date)[:10]
-    sessions = sorted(b["date"] for b in market.get("SPY", []) if b["date"] < run_day)
+    immediate = (candidate.get("risk_rules") or {}).get("decision_policy") == "job-execution-v3"
+    sessions = sorted(b["date"] for b in market.get("SPY", []) if b["date"] < run_day or (immediate and b["date"] == run_day))
     if not sessions:
         raise ValueError("No completed benchmark session")
     out = deepcopy(candidate)
@@ -159,7 +160,12 @@ def build_ledger(candidate, previous, published, market, run_date, macro_score):
     performance = deepcopy(old.get("performance") or {"series": [], "stats": {}, "rebalance_log": []})
     book = deepcopy(old.get("ledger"))
     trades = []
-    if book:
+    if immediate and book and book.get("last_execution_date") == run_day:
+        return deepcopy(old)
+    if immediate and book and book.get("pending"):
+        book.setdefault("superseded_decisions", []).append({"superseded_on": run_day, "decision": book.pop("pending"), "reason": "Replaced prospectively by job-time execution policy"})
+        book["pending"] = None
+    if book and not book.get("last_execution_date"):
         for ticker, position in book["positions"].items():
             reference = _bar(market, ticker, book["as_of"])["close"]
             if not math.isclose(reference, position["current_price"], rel_tol=1e-6, abs_tol=.0001):
@@ -263,14 +269,14 @@ def build_ledger(candidate, previous, published, market, run_date, macro_score):
             book["as_of"] = day
     book["trades"].extend(trades)
     for ticker, position in book["positions"].items():
-        position.update(volume_signal([b for b in market.get(ticker, []) if b["date"] <= book["as_of"]]))
+        position.update(volume_signal([b for b in market.get(ticker, []) if b["date"] <= book["as_of"] and not b.get("intraday")]))
     holdings, nav = _views(book)
     completed_market = {t: [b for b in bars if b["date"] < run_day] for t, bars in market.items()}
     target_rows, exposure = target_holdings(candidate, completed_market, macro_score)
     old_target = number(old.get("target_stock_exposure"), exposure)
     invested = 1-book["cash"]/nav
     review = {"status": "pending", "reason": "Previously published decision awaits its eligible completed session", "risk_exits": {}}
-    if book.get("pending") is None:
+    if not immediate and book.get("pending") is None:
         # Enable prospective daily policy only when explicitly supplied by the
         # production candidate. Historical accounting fixtures retain v1 behavior.
         if (candidate.get("risk_rules") or {}).get("decision_policy") == "daily-v2":
@@ -291,10 +297,14 @@ def build_ledger(candidate, previous, published, market, run_date, macro_score):
                                "holdings": target_rows, "macro_score": macro_score, "target_stock_exposure": exposure,
                                "decision_review": review}
             book["last_decision_date"] = run_day
+    if immediate:
+        from src.portfolio_execution import execute_at_job_quote
+        holdings, nav, trades, review, exposure = execute_at_job_quote(book, candidate, market, run_day, macro_score, trades)
+        invested = 1-book["cash"]/nav
     out["decision_review"] = review
     if book.get("pending"):
         exposure = book["pending"]["target_stock_exposure"]
-    else:
+    elif not immediate:
         exposure = old_target
     out.update({"ledger": book, "holdings": holdings, "stock_exposure": invested, "cash_weight": book["cash"]/nav,
                 "target_stock_exposure": exposure, "valuation_as_of": book["as_of"], "macro_score": macro_score,
@@ -331,4 +341,17 @@ def build_ledger(candidate, previous, published, market, run_date, macro_score):
         "macro_allocation": "65% at scores <=25, rising linearly to 95% at >=75. Broad-market SPY fills capacity left by individual-stock caps.",
         "daily_review": "Daily completed-session risk review: exit a published stop breach or three closes below falling EMA21. Routine adjustments use a 1 percentage point deadband, 2 points per stock and 10% one-way budget; SPY balances exposure. Safety exits and concentration/exposure limits override pacing. Risk exits block re-entry for five completed sessions. Published pending decisions execute unchanged before another decision is queued.",
         "entry": "First published entry reference for the current holding period; adds/trims do not reset it. Price change since entry is not a money-weighted position return."})
+    if immediate:
+        out["execution_policy"] = "job-quote-v1"
+        out["valuation_timestamp"] = book["valuation_timestamp"]
+        out["performance"]["methodology_note"] = (
+            "Quantitative model portfolio. Published historical returns and moves are retained unchanged. "
+            "From the job-time execution policy, each run marks holdings and executes model changes at timestamped quotes observed during that run. "
+            "These are model reference prices, not broker fills; returns exclude fees, taxes and slippage. Earlier retrospective history remains identified by the accounting anchor."
+        )
+        out.setdefault("methodology", {})["daily_review"] = (
+            "Every job reviews published stop breaches at its quote, three completed closes below a falling EMA21, composite below 60, technical below 45, and loss of model eligibility. "
+            "Exits execute in the same publication; no pending allocation. Routine sizing remains paced. Positions below 1% are closed. "
+            "Existing entry references and published history are preserved."
+        )
     return out

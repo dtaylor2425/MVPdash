@@ -18,6 +18,8 @@ def publication_health(payload, now=None):
     run = str((payload.get("snapshot") or {}).get("run_date") or "")[:10]
     prior = [day for day in sessions if day.isoformat() < run]
     expected_valuation = prior[-1].isoformat() if prior else None
+    if payload.get("execution_policy") == "job-quote-v1":
+        expected_valuation = run
     actual = str(payload.get("valuation_as_of") or "")[:10]
     publication_late = not run or bool(expected and run < expected)
     valuation_late = not actual or bool(expected_valuation and actual < expected_valuation)

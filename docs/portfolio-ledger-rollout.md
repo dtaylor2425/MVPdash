@@ -130,3 +130,25 @@ The latest API reports NYSE-calendar publication/valuation health with a 15:30
 New York deadline (3 p.m. job plus grace). It forbids cache storage. The pages
 show publication/valuation dates, distinct trailing-year and YTD compounded
 returns, and gated-history messages rather than false 'no trades' claims.
+
+
+## Job-time execution policy (November 2026)
+
+The production job now selects `job-execution-v3`. Both portfolios mark positions
+and execute model allocation changes at observed regular-session minute quotes in
+the same publication. Quotes must be no older than 15 minutes. These are model
+reference prices, not broker fills; fees and slippage are excluded. This supersedes
+the next-session execution guidance above for future publications.
+
+Hard exits include published stop breaches, three completed closes below falling
+EMA21, composite below 60, technical below 45, trend-break risk, and removal from
+the current eligible selection. Positions below 1% are closed. Ordinary resizing
+remains paced; SPY balances the 65-95% macro exposure target. Existing unexecuted
+queues are archived as superseded decisions, not recorded as trades.
+
+Published entries, trade history and performance prefixes remain immutable.
+Same-day reruns do not replace a publication. A manual run requires an open NYSE
+session and a date with no existing publication; never backdate a catch-up. After
+market close, wait for the next eligible scheduled run. The existing DST-safe
+3 p.m. New York cron/start command remains unchanged. No database migration is
+required. UI shows applied/reviewed job status and published allocations.
