@@ -502,4 +502,6 @@ def run(argv: Optional[List[str]] = None, fetcher: Any = None, conn_factory: Opt
 
 
 if __name__ == "__main__":
+    print('ThetaData collection is disabled; use jobs/stock_research_refresh.py for stocks.', flush=True)
+    sys.exit(0)
     sys.exit(run())

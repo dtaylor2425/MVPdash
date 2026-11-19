@@ -38,7 +38,7 @@ def test_old_snapshot_enrichment_preserves_stored_score_and_inputs(monkeypatch):
     from api.routers.stock_participation import stock_participation
     from api.services import theta_stock_store as store
     daily = bars(280)
-    payload = build_participation_payload('NET', daily, [], daily)
+    payload = build_participation_payload('NET', daily, [], daily, feed_metadata={'provider':'Yahoo Finance / yfinance','daily_feed':'yahoo_daily'})
     payload.pop('analytics_view_version')
     payload['bars'] = daily[-260:]
     saved = copy.deepcopy(payload)
@@ -46,8 +46,8 @@ def test_old_snapshot_enrichment_preserves_stored_score_and_inputs(monkeypatch):
         market_date=date.fromisoformat(daily[-1]['date']),updated_at=datetime.now(timezone.utc)))
     monkeypatch.setattr(store, 'load_daily_cache', lambda symbol: dict(daily_bars=daily))
     result = stock_participation('NET', Response())
-    assert result['sector_symbol'] == 'XLK'
-    assert result['metrics']['relative_strength_sector_20d_pct'] == 0
+    assert result['sector_symbol'] is None
+    assert result['metrics']['relative_strength_sector_20d_pct'] is None
     assert result['bars'][-1]['sma200'] is not None
     assert result['score'] == saved['score']
     assert payload == saved

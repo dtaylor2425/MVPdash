@@ -116,6 +116,12 @@ def build_participation_payload(symbol, daily_bars, intraday_bars, benchmark_bar
     previous_close = previous_regular[-1]["close"] if previous_regular else None
     regular_close = regular[-1]["close"] if regular else None
     regular_open = regular[0]["open"] if regular else None
+    yahoo_daily = (feed_metadata or {}).get('daily_feed') == 'yahoo_daily'
+    if yahoo_daily and not regular:
+        # Yahoo daily OHLC represents the regular session. Preserve daily
+        # evidence when five-minute coverage is absent, without inventing bars.
+        regular_open, regular_close = now['open'], now['close']
+        previous_close = prior['close'] if prior else None
     gap = (regular_open / previous_close - 1) * 100 if regular_open and previous_close else None
     gap_retained = (regular_close - previous_close) / (regular_open - previous_close) * 100 if previous_close and regular_close and abs(gap or 0) >= .1 else None
     regular_return = (regular_close / previous_close - 1) * 100 if regular_close and previous_close else None
@@ -123,6 +129,8 @@ def build_participation_payload(symbol, daily_bars, intraday_bars, benchmark_bar
     relative_volume = now["volume"] / statistics.median(prior_vol) if len(prior_vol) == 20 and now["volume"] is not None else None
     regular_high = max(r["high"] for r in regular) if regular else None
     regular_low = min(r["low"] for r in regular) if regular else None
+    if yahoo_daily and not regular:
+        regular_high, regular_low = now['high'], now['low']
     close_location = (regular_close - regular_low) / (regular_high - regular_low) * 100 if regular_high and regular_low and regular_high > regular_low else None
     sma20 = statistics.mean(closes[-20:]) if len(closes) >= 20 and not discontinuity else None
     sma50 = statistics.mean(closes[-50:]) if len(closes) >= 50 and not discontinuity else None
@@ -179,8 +187,12 @@ def build_participation_payload(symbol, daily_bars, intraday_bars, benchmark_bar
     enriched_bars = enrich_price_bars(bars)
     metrics['sma200'] = enriched_bars[-1]['sma200']
     metrics.update(session_anatomy(intraday, now['date']))
-    return {"ticker":symbol,"as_of":now["date"],"source":"ThetaData","feed":feed_metadata or {},"analytics_view_version":2,
-        "coverage_note":f"{len(bars)} daily EOD reports (17:15 ET, may include after-hours); {len(intraday)} regular-session intraday bars. Unadjusted prices, not total returns.",
+    if yahoo_daily and not regular:
+        metrics.update(regular_volume=now['volume'],
+            intraday_range_pct=(now['high']-now['low'])/now['open']*100,
+            open_to_close_return_pct=(now['close']/now['open']-1)*100)
+    return {"ticker":symbol,"as_of":now["date"],"source":(feed_metadata or {}).get("provider", "ThetaData"),"feed":feed_metadata or {},"analytics_view_version":2,
+        "coverage_note":(feed_metadata or {}).get("coverage_note") or f"{len(bars)} daily EOD reports (17:15 ET, may include after-hours); {len(intraday)} regular-session intraday bars. Unadjusted prices, not total returns.",
         "bars":enriched_bars[-260:],"intraday":intraday,"sector_symbol":sector_symbol,
         "metrics":{k:rounded(v) for k,v in metrics.items()},
         "availability":metric_availability(metrics, sector_symbol),
@@ -189,7 +201,7 @@ def build_participation_payload(symbol, daily_bars, intraday_bars, benchmark_bar
             "Participation score is a fixed descriptive rubric, not a probability, forecast, or portfolio allocation signal.",
             "Missing measures remain unavailable. A composite requires at least 70% of the intended weight; available weights are rescaled.",
             "Relative volume excludes the current session from its 20-session median baseline. No partial-session/full-day comparison is used.",
-            "Gap and closing-strength metrics use regular-session bars only; daily return and relative volume use national EOD reports, which can include after-hours trades.",
+            ("Gap and closing strength use complete regular-session bars, or Yahoo daily OHLC when intraday coverage is unavailable. Daily return and relative volume use Yahoo daily history. VWAP and opening/closing volume shares require complete intraday coverage." if (feed_metadata or {}).get("daily_feed") == "yahoo_daily" else "Gap and closing-strength metrics use regular-session bars only; daily return and relative volume use national EOD reports, which can include after-hours trades."),
             "Intraday VWAP is an approximation from bar typical price weighted by bar volume, not tick-level execution VWAP.",
             "50- and 200-session moving averages are trailing curves, requiring a complete observation window; they are withheld across large unadjusted price discontinuities.",
             "Session activity uses observed regular-session five-minute bars. Turnover is estimated from typical price times volume. Opening/closing volume shares cover 30 minutes at each end of the exchange session, including early closes; they do not indicate net buying or selling.",

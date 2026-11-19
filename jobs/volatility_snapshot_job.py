@@ -1,6 +1,6 @@
 """
 Persist one Macro Engine volatility snapshot to Postgres.
-Recommended Railway cron: */15 13-21 * * 1-5
+Recommended Railway cron: 5 14-22 * * 1-5 (hourly; includes post-close)
 """
 
 from __future__ import annotations

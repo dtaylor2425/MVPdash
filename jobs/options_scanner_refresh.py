@@ -208,6 +208,8 @@ def run(args,fetcher=None):
             lock.close()
 
 if __name__=='__main__':
+    print('ThetaData collection is disabled; use jobs/stock_research_refresh.py for stocks.', flush=True)
+    sys.exit(0)
     load_local_env()
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--date')

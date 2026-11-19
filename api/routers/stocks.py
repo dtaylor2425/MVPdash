@@ -7,11 +7,11 @@ GET /api/stocks/search?q=AAPL        — ticker autocomplete (yfinance)
 GET /api/stocks/screener             — most undervalued S&P 500 vs DCF
 GET /api/stocks/{ticker}             — price + fundamentals snapshot
 GET /api/stocks/{ticker}/chart       — OHLCV + moving averages
-GET /api/stocks/{ticker}/pe          — historical P/E ratio (FMP)
+GET /api/stocks/{ticker}/pe          — historical P/E ratio (Yahoo)
 GET /api/stocks/{ticker}/dcf         — DCF valuation (fixed assumptions)
 GET /api/stocks/{ticker}/patterns    — pattern matching similar historical periods
 
-FMP free tier: 250 calls/day — used for historical P/E and screener only.
+Yahoo Finance supplies stock data; FRED supplies macro data.
 yfinance: used for price data, fundamentals, financials.
 """
 
@@ -29,8 +29,6 @@ from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(tags=["Stocks"])
 
-FMP_KEY = "CJQNAEmAHwczmW95TzmdyIUfghkWOcw8"
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
 
 # ── DCF fixed assumptions ─────────────────────────────────────────────────────
 DCF_WACC          = 0.10   # 10% discount rate
@@ -53,25 +51,6 @@ def _set(key: str, data):
     with _cache_lock:
         _cache[key] = {"data": data, "ts": time.time()}
 
-def _fmp(path: str, params: dict = {}):
-    """Call FMP API with caching."""
-    cache_key = f"fmp:{path}:{sorted(params.items())}"
-    cached = _get(cache_key, ttl=3600 * 6)
-    if cached is not None:
-        return cached
-    try:
-        r = requests.get(
-            f"{FMP_BASE}{path}",
-            params={**params, "apikey": FMP_KEY},
-            timeout=10,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            _set(cache_key, data)
-            return data
-    except Exception:
-        pass
-    return None
 
 def _yf_info(ticker: str) -> dict:
     cached = _get(f"yf:info:{ticker}", ttl=1800)
@@ -250,24 +229,19 @@ SP500_SAMPLE = [
 
 @router.get("/stocks/search")
 def stock_search(q: str = Query(..., min_length=1)):
-    """Ticker autocomplete using FMP search."""
+    """Ticker autocomplete using Yahoo Finance search."""
     cached = _get(f"search:{q.upper()}", ttl=86400)
     if cached:
         return {"results": cached}
 
     results = []
     try:
-        data = _fmp(f"/search", {"query": q, "limit": 8, "exchange": "NASDAQ,NYSE"})
-        if data:
-            results = [
-                {
-                    "ticker":   r.get("symbol", ""),
-                    "name":     r.get("name", ""),
-                    "exchange": r.get("exchangeShortName", ""),
-                }
-                for r in data
-                if r.get("symbol") and r.get("name")
-            ][:8]
+        data = yf.Search(q, max_results=8).quotes
+        results = [
+            {'ticker': r['symbol'], 'name': r.get('shortname') or r.get('longname') or r['symbol'],
+             'exchange': r.get('exchange', '')}
+            for r in data if r.get('symbol') and r.get('quoteType') in ('EQUITY', 'ETF')
+        ][:8]
     except Exception:
         pass
 
@@ -288,7 +262,7 @@ def stock_search(q: str = Query(..., min_length=1)):
 def stock_screener():
     """
     Run DCF on S&P 500 sample and return most undervalued tickers.
-    Cached for 24 hours to preserve FMP API calls.
+    Cached for 24 hours to bound Yahoo requests.
     """
     cached = _get("screener:sp500", ttl=86400)
     if cached:
@@ -467,8 +441,8 @@ def stock_chart(
 @router.get("/stocks/{ticker}/pe")
 def stock_pe_history(ticker: str):
     """
-    Historical P/E ratio from FMP.
-    Falls back to computing trailing P/E from price / EPS if FMP fails.
+    Retrospective P/E from Yahoo quarterly EPS and price history.
+    Requires four reported quarters; never annualizes an incomplete EPS window.
     """
     ticker = ticker.upper()
     cached = _get(f"pe:{ticker}", ttl=3600 * 12)
@@ -477,33 +451,39 @@ def stock_pe_history(ticker: str):
 
     points = []
 
-    # Try FMP historical P/E
-    data = _fmp(f"/historical-price-full/{ticker}", {"serietype": "line"})
-    earnings = _fmp(f"/income-statement/{ticker}", {"limit": 20, "period": "quarter"})
-
-    if earnings:
-        # Build quarterly EPS history
-        eps_map = {}
-        for e in earnings:
-            date = e.get("date", "")[:10]
-            eps  = e.get("eps")
-            if date and eps:
-                eps_map[date] = float(eps)
+    earnings, eps_map = [], {}
+    try:
+        income = yf.Ticker(ticker).quarterly_income_stmt
+        if not income.empty and 'Diluted EPS' in income.index:
+            eps = income.loc['Diluted EPS'].dropna()
+            eps_map = {pd.Timestamp(d).strftime('%Y-%m-%d'): float(v) for d,v in eps.items() if np.isfinite(v)}
+            earnings = bool(eps_map)
+    except Exception:
+        pass
 
     # Get price history and compute trailing P/E
-    df = _yf_history(ticker, period="5y")
+    try:
+        df = yf.Ticker(ticker).history(period="5y", auto_adjust=False, actions=True)
+    except Exception:
+        df = pd.DataFrame()
     if not df.empty and earnings:
         close = df["Close"].dropna()
         # Use most recent 4 quarters EPS for trailing
         if eps_map:
             sorted_eps = sorted(eps_map.items(), reverse=True)
             # Compute trailing 12m EPS per quarter
-            for i in range(len(sorted_eps)):
+            for i in range(max(0, len(sorted_eps)-3)):
                 date_str = sorted_eps[i][0]
-                trailing_eps = sum(v for _, v in sorted_eps[i:i+4])
+                window = sorted_eps[i:i+4]
+                dates = [pd.Timestamp(d) for d,_ in window]
+                if any(not 60 <= (a-b).days <= 120 for a,b in zip(dates,dates[1:])):
+                    continue
+                trailing_eps = sum(v for _, v in window)
                 if trailing_eps > 0:
                     try:
                         dt = pd.Timestamp(date_str)
+                        if close.index.tz is not None:
+                            dt = dt.tz_localize(close.index.tz)
                         price_at = close.asof(dt) if dt in close.index or dt >= close.index[0] else None
                         if price_at and not np.isnan(price_at):
                             pe = round(float(price_at) / trailing_eps, 2)
@@ -517,7 +497,9 @@ def stock_pe_history(ticker: str):
     out = {
         "ticker": ticker,
         "points": points,
-        "current_pe": points[-1]["pe"] if points else None,
+        "source": "Yahoo Finance / yfinance",
+        "basis": "Retrospective fiscal-period-end ratios, not point-in-time investable signals; only complete four-quarter EPS windows are used.",
+        "current_pe": _yf_info(ticker).get('trailingPE'),
         "avg_pe": round(np.mean([p["pe"] for p in points]), 1) if points else None,
         "min_pe": round(min(p["pe"] for p in points), 1) if points else None,
         "max_pe": round(max(p["pe"] for p in points), 1) if points else None,

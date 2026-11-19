@@ -1,18 +1,11 @@
-# theta-options-worker: Python 3.12 (thetadata requires >= 3.12; the API service stays on 3.11).
-# Railway: create a second service from this repo and set RAILWAY_DOCKERFILE_PATH=Dockerfile.theta-worker
-# (or point its config-as-code path at railway.theta-worker.json).
+# Legacy Railway path, now a Yahoo stock research worker (no Theta SDK).
 FROM python:3.12-slim
-
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
-
-COPY requirements-theta-worker.txt .
-RUN pip install -r requirements-theta-worker.txt
-
-# Only what the worker imports: the metrics/store/calendar/config services, the DB helper, the SQL, the job.
+COPY requirements-stock-worker.txt .
+RUN pip install -r requirements-stock-worker.txt
 COPY api/__init__.py api/db.py api/
 COPY api/services/ api/services/
 COPY sql/ sql/
-COPY jobs/options_flow_refresh.py jobs/options_flow_backfill.py jobs/theta_stock_refresh.py jobs/options_scanner_refresh.py jobs/market_data_refresh.py jobs/
-
+COPY jobs/ jobs/
 CMD ["python", "jobs/market_data_refresh.py"]

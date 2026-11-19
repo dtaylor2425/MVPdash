@@ -1,4 +1,4 @@
-"""Public read-only access to worker-produced Theta stock research snapshots."""
+"""Public read-only access to worker-produced stock research snapshots."""
 from datetime import datetime, timezone, time
 from fastapi import APIRouter, HTTPException, Response
 from psycopg.errors import UndefinedTable
@@ -18,7 +18,9 @@ def stock_participation(ticker: str, response: Response):
     except UndefinedTable:
         raise HTTPException(503, "Stock participation snapshots are being prepared")
     if not row:
-        raise HTTPException(404, "Theta stock participation is not yet available for this ticker")
+        raise HTTPException(404, "Stock participation is not yet available for this ticker")
+    if row['payload'].get('source') != 'Yahoo Finance / yfinance':
+        raise HTTPException(404, "Yahoo stock research is being prepared; workbook history remains available")
     payload = dict(row["payload"])
     # Add display analytics to older snapshots using their original stored inputs.
     # This neither fetches vendor data nor rewrites a published score or history.
@@ -31,18 +33,6 @@ def stock_participation(ticker: str, response: Response):
             clean_bars(payload.get('intraday', []), 'timestamp'), str(row['market_date'])).items()})
         payload['metrics'] = metrics
         payload['analytics_view_version'] = 2
-    if not payload.get('sector_symbol') and symbol in store.SECTOR_FALLBACKS:
-        sector = store.SECTOR_FALLBACKS[symbol]
-        cache = store.load_daily_cache(sector)
-        bars = payload.get('bars', [])
-        lookup = {b['date']: b['close'] for b in clean_bars(cache['daily_bars'])} if cache else {}
-        if len(bars) >= 21 and payload.get('metrics', {}).get('relative_strength_spy_20d_pct') is not None:
-            first, last = bars[-21], bars[-1]
-            a, b = lookup.get(first['date']), lookup.get(last['date'])
-            if a and b:
-                payload['metrics'] = dict(payload['metrics'], relative_strength_sector_20d_pct=rounded(
-                    ((last['close']/first['close']-1)-(b/a-1))*100))
-                payload['sector_symbol'] = sector
     payload['availability'] = metric_availability(payload.get('metrics', {}), payload.get('sector_symbol'))
     now = datetime.now(timezone.utc).astimezone(NY)
     today = now.date()
