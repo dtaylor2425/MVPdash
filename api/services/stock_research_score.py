@@ -61,4 +61,4 @@ def build_research_score(info):
             "Company evidence score uses five disclosed fundamental rubrics. It is separate from price participation, published stock rankings, and portfolio construction.",
             "Missing data is never assigned 50. Available pillar weights are rescaled; at least three pillars and 60% weight must be available.",
             "Bounds are research design choices, not calibrated return probabilities or sector-relative ranks. A high score does not imply an attractive entry price.",
-            "Source: Yahoo Finance company fundamentals and analyst forward earnings estimates. ThetaData supplies the separate market participation panel."]}
+            "Source: Yahoo Finance company fundamentals and analyst forward earnings estimates. Yahoo Finance supplies the separate market participation panel."]}

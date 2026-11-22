@@ -132,3 +132,23 @@ def regime_history(
             "max": max(p["score"] for p in points) if points else None,
         },
     }
+
+@router.get('/regime/record')
+def regime_record():
+    """Macro scores recorded in immutable published Alpha snapshots."""
+    from api.db import get_connection
+    from api.services.regime_record import compare_published
+    try:
+        with get_connection() as conn:
+            rows = conn.execute("""SELECT id, published_at, payload->>'macro_score' AS score
+                FROM portfolio_runs WHERE strategy='stock_alpha' AND is_published=true
+                AND published_at IS NOT NULL AND payload->>'macro_score' IS NOT NULL
+                ORDER BY published_at ASC""").fetchall()
+        points = compare_published(rows, get_prices())
+    except Exception as exc:
+        raise HTTPException(503, 'Published score comparison is temporarily unavailable') from exc
+    return {'points':points,'meta':{'basis':'published_alpha_snapshots',
+        'score_source':'First published Alpha snapshot each New York calendar day',
+        'spy_source':'Yahoo Finance adjusted daily close; rebased to 100 at first matched date',
+        'unmatched_or_duplicate_records':len(rows)-len(points),
+        'limitations':'Recorded scores, not reconstructed history. SPY closes may occur after publication. Missing dates are omitted. This comparison is not a strategy return or proof of predictive ability. Model versions may differ across publications.'}}
