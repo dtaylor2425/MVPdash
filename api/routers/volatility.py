@@ -449,3 +449,21 @@ def natr_only(map_mode: str = Query("Both", pattern="^(Both|ATR length|Norm leng
         return {"underlying": "^GSPC", "spx": round(float(history["Close"].iloc[-1]), 2), "map_mode": map_mode, "natr": build_natr_ladder(history, map_mode=map_mode)}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@router.get('/overview')
+def volatility_overview():
+    """Read stored index history; never fetch option chains on page load."""
+    from api.db import get_connection
+    from psycopg.errors import UndefinedTable
+    from api.services.volatility_overview import overview_from_series
+    try:
+        with get_connection() as conn:
+            row = conn.execute('SELECT payload FROM volatility_overview_snapshots ORDER BY as_of DESC LIMIT 1').fetchone()
+    except UndefinedTable:
+        raise HTTPException(503, 'VIX overview is being prepared')
+    if not row:
+        raise HTTPException(503, 'VIX overview is being prepared')
+    payload = row['payload']
+    check = overview_from_series({'vix':[(p['date'],p['vix']) for p in payload['points']]})
+    return dict(payload,stale=check['stale'],expected_session=check['expected_session'])
