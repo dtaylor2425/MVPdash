@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import time
+from threading import RLock
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -33,6 +34,8 @@ router = APIRouter(prefix="/api/smid-growth-portfolio", tags=["smid-growth-portf
 
 CACHE_TTL_SECONDS = 60 * 60
 _CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_CACHE_LOCK = RLock()
+MAX_CACHE_ENTRIES = 32
 
 BENCHMARK_TICKER = "SPY"
 DEFAULT_TARGET_HOLDINGS = 15
@@ -137,19 +140,30 @@ def _safe_divide(numerator: Any, denominator: Any) -> Optional[float]:
     return top / bottom
 
 
-def _cache_get(key: str) -> Optional[Dict[str, Any]]:
-    item = _CACHE.get(key)
-    if not item:
-        return None
-    expires_at, payload = item
-    if time.time() >= expires_at:
+def _prune_cache(now: float) -> None:
+    for key in list(_CACHE):
+        if _CACHE[key][0] <= now:
+            del _CACHE[key]
+
+
+def _cache_get(key: str):
+    with _CACHE_LOCK:
+        _prune_cache(time.time())
+        item = _CACHE.pop(key, None)
+        if item is None:
+            return None
+        _CACHE[key] = item
+        return item[1]
+
+
+def _cache_set(key: str, payload: Dict[str, Any]):
+    with _CACHE_LOCK:
+        now = time.time()
+        _prune_cache(now)
         _CACHE.pop(key, None)
-        return None
-    return payload
-
-
-def _cache_set(key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    _CACHE[key] = (time.time() + CACHE_TTL_SECONDS, payload)
+        _CACHE[key] = (now + CACHE_TTL_SECONDS, payload)
+        while len(_CACHE) > MAX_CACHE_ENTRIES:
+            del _CACHE[next(iter(_CACHE))]
     return payload
 
 

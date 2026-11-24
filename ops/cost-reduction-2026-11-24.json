@@ -1,0 +1,22 @@
+{
+  "purpose": "Remove Youngbull hosting and reduce Macro Engine idle memory and redundant refreshes.",
+  "youngbull": {
+    "projectId": "079fa217-50c1-49d5-aab1-a22f682cb3e3",
+    "projectName": "reliable-exploration",
+    "action": "Project deletion accepted by Railway and deletedAt verified; includes web service, weekly score-refresh and Postgres. Owner explicitly requested removal."
+  },
+  "macro_engine": {
+    "projectId": "42b8b0c1-8b78-4660-aaeb-4496492a28bf",
+    "volatilityCronBefore": "5 14-22 * * 1-5",
+    "volatilityCronAfter": "5 22 * * 1-5",
+    "apiRuntimeVariables": {
+      "OPENBLAS_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "NUMEXPR_NUM_THREADS": "1",
+      "MALLOC_ARENA_MAX": "2"
+    },
+    "cacheLimits": {"stocks": 128, "stock_rankings": 32, "stock_portfolio": 32, "smid_growth_portfolio": 32},
+    "preserved": "Daily stock and portfolio jobs, published portfolio records and all Macro Engine database contents. API remains always available; no hard memory cap lowered."
+  }
+}

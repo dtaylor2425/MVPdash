@@ -38,18 +38,34 @@ DCF_FCF_GROWTH    = 0.08   # 8% assumed FCF growth (conservative)
 
 # ── In-memory cache ───────────────────────────────────────────────────────────
 _cache: dict = {}
+MAX_CACHE_ENTRIES = 128
 _cache_lock = threading.Lock()
+
+def _prune_cache(now: float):
+    for key in list(_cache):
+        if now >= _cache[key]["expires"]:
+            del _cache[key]
+
 
 def _get(key: str, ttl: int = 3600):
     with _cache_lock:
-        if key in _cache:
-            if time.time() - _cache[key]["ts"] < ttl:
-                return _cache[key]["data"]
+        now = time.time()
+        _prune_cache(now)
+        item = _cache.pop(key, None)
+        if item is not None and now - item["ts"] < ttl:
+            _cache[key] = item
+            return item["data"]
     return None
 
-def _set(key: str, data):
+
+def _set(key: str, data, ttl: int = 3600):
     with _cache_lock:
-        _cache[key] = {"data": data, "ts": time.time()}
+        now = time.time()
+        _prune_cache(now)
+        _cache.pop(key, None)
+        _cache[key] = {"data": data, "ts": now, "expires": now + ttl}
+        while len(_cache) > MAX_CACHE_ENTRIES:
+            del _cache[next(iter(_cache))]
 
 
 def _yf_info(ticker: str) -> dict:
@@ -59,7 +75,7 @@ def _yf_info(ticker: str) -> dict:
     try:
         t = yf.Ticker(ticker)
         info = t.info or {}
-        _set(f"yf:info:{ticker}", info)
+        _set(f"yf:info:{ticker}", info, ttl=1800)
         return info
     except Exception:
         return {}
@@ -72,7 +88,7 @@ def _yf_history(ticker: str, period: str = "2y") -> pd.DataFrame:
     try:
         t = yf.Ticker(ticker)
         df = t.history(period=period, auto_adjust=True)
-        _set(cache_key, df)
+        _set(cache_key, df, ttl=900)
         return df
     except Exception:
         return pd.DataFrame()
@@ -254,7 +270,7 @@ def stock_search(q: str = Query(..., min_length=1)):
             if t.startswith(q_up)
         ][:6]
 
-    _set(f"search:{q.upper()}", results)
+    _set(f"search:{q.upper()}", results, ttl=86400)
     return {"results": results}
 
 
@@ -286,7 +302,7 @@ def stock_screener():
 
     results.sort(key=lambda x: x["upside_pct"], reverse=True)
     out = {"screener": results[:20], "updated": datetime.now().date().isoformat()}
-    _set("screener:sp500", out)
+    _set("screener:sp500", out, ttl=86400)
     return out
 
 
@@ -335,7 +351,7 @@ def stock_snapshot(ticker: str):
         "description":  (info.get("longBusinessSummary") or "")[:400],
     }
 
-    _set(f"snap:{ticker}", snap)
+    _set(f"snap:{ticker}", snap, ttl=900)
     return snap
 
 
@@ -434,7 +450,7 @@ def stock_chart(
             "count":    len(points),
         }
     }
-    _set(cache_key, out)
+    _set(cache_key, out, ttl=900)
     return out
 
 
@@ -504,7 +520,7 @@ def stock_pe_history(ticker: str):
         "min_pe": round(min(p["pe"] for p in points), 1) if points else None,
         "max_pe": round(max(p["pe"] for p in points), 1) if points else None,
     }
-    _set(f"pe:{ticker}", out)
+    _set(f"pe:{ticker}", out, ttl=3600 * 12)
     return out
 
 
@@ -517,7 +533,7 @@ def stock_dcf(ticker: str):
         return cached
     result = _compute_dcf(ticker)
     if "error" not in result:
-        _set(f"dcf:{ticker}", result)
+        _set(f"dcf:{ticker}", result, ttl=3600 * 12)
     return result
 
 
@@ -545,5 +561,5 @@ def stock_patterns(
     result["ticker"] = ticker
     result["period"] = period
 
-    _set(cache_key, result)
+    _set(cache_key, result, ttl=3600 * 6)
     return result

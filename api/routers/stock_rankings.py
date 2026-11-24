@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import time
+from threading import RLock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -26,6 +27,8 @@ from api.auth_deps import optional_account
 
 router = APIRouter(prefix="/api/stock-rankings", tags=["stock-rankings"])
 _CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_CACHE_LOCK = RLock()
+MAX_CACHE_ENTRIES = 32
 CACHE_TTL_SECONDS = 45 * 60
 MAX_WORKERS = 8
 MAX_LIMIT = 50
@@ -54,17 +57,32 @@ THEME_UNIVERSE = [
 ]
 UNIVERSES = {"quality": QUALITY_UNIVERSE, "growth": GROWTH_UNIVERSE, "large_cap": LARGE_CAP_UNIVERSE, "themes": THEME_UNIVERSE}
 
+def _prune_cache(now: float) -> None:
+    for key in list(_CACHE):
+        if _CACHE[key][0] <= now:
+            del _CACHE[key]
+
+
 def _cache_get(key: str):
-    item = _CACHE.get(key)
-    if not item: return None
-    expires_at, payload = item
-    if time.time() >= expires_at:
-        _CACHE.pop(key, None); return None
-    return payload
+    with _CACHE_LOCK:
+        _prune_cache(time.time())
+        item = _CACHE.pop(key, None)
+        if item is None:
+            return None
+        _CACHE[key] = item
+        return item[1]
+
 
 def _cache_set(key: str, payload: Dict[str, Any], ttl: int):
-    _CACHE[key] = (time.time() + ttl, payload)
+    with _CACHE_LOCK:
+        now = time.time()
+        _prune_cache(now)
+        _CACHE.pop(key, None)
+        _CACHE[key] = (now + ttl, payload)
+        while len(_CACHE) > MAX_CACHE_ENTRIES:
+            del _CACHE[next(iter(_CACHE))]
     return payload
+
 
 def _finite(value: Any) -> Optional[float]:
     try: number = float(value)
